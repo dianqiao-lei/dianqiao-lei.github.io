@@ -26,3 +26,14 @@ a:focus{outline:none}*,*:before,*:after{-moz-box-sizing:border-box;-webkit-box-s
 .page__content .authors sup{color:var(--high);font-weight:700}
 .sidebar .author__bio{font-family:"Songti SC","STSong","SimSun","Noto Serif SC Name","Charis SIL",Charter,"Iowan Old Style",Georgia,"PingFang SC","Hiragino Sans GB","Microsoft YaHei",serif}
 .edu-card .edu-degree,.edu-card .edu-stats strong{color:var(--fg)}
+/* Align publication summaries while keeping narrow screens comfortable to read. */
+.page__content .pub-summary{
+  font-size:16px;
+  line-height:1.6;
+  text-align:justify;
+  text-align-last:left;
+  hyphens:manual;
+}
+@media (max-width:700px){
+  .page__content .pub-summary{text-align:left;hyphens:manual;}
+}
