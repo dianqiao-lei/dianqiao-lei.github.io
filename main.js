@@ -271,7 +271,7 @@ function pageScale() {
 
 /* All Publications: one list, sorted once for everyone (see CLAUDE.md). Each item
    carries its group, data-group="first" | "collab", and its topics,
-   data-topics="agent robotics" (kramdown `- {: data-group="…" data-topics="…"}`).
+   data-topics="agent ai4s" (kramdown `- {: data-group="…" data-topics="…"}`).
    The tabs choose a group (or All), the chips a topic, and only matching papers
    are shown. The shown papers are then regrouped on a year timeline: a paper's
    year is its data-year, or else the last year in its venue ("ICML 2026").
@@ -288,7 +288,7 @@ function pageScale() {
   ];
   var TOPICS = [
     ['agent', '🤖 Agent'],
-    ['robotics', '🦾 Robotics'],
+    ['ai4s', '🧪 AI4S'],
     ['multimedia', '🖼️ Multimedia'],
   ];
   var items = Array.prototype.slice.call(list.querySelectorAll('li'));
@@ -310,7 +310,7 @@ function pageScale() {
 
   var empty = document.createElement('p');
   empty.className = 'pub-empty';
-  empty.textContent = 'No papers under this topic yet.';
+  empty.textContent = 'No papers match these filters.';
   empty.hidden = true;
   list.appendChild(empty);
   list.id = 'pub-list';
