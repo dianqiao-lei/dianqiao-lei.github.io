@@ -37,3 +37,13 @@ a:focus{outline:none}*,*:before,*:after{-moz-box-sizing:border-box;-webkit-box-s
 @media (max-width:700px){
   .page__content .pub-summary{text-align:left;hyphens:manual;}
 }
+
+/* Publication recognition, shared by the featured card and full list. */
+.page__content .pub-highlights{
+  margin:0;
+  color:var(--sl-red);
+  font-size:var(--fs-sm);
+  font-weight:700;
+  line-height:1.45;
+}
+.page__content .pub-list .pub-highlights{margin-top:4px;}
