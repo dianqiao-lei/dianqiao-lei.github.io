@@ -74,7 +74,7 @@ async function rejectCollector(h) {
 
 function markerCount(h, n) {
   assert.equal(h.svg.children.length, 1);
-  assert.match(h.svg.children[0].attrs['aria-label'], new RegExp(` · ${n} page view`));
+  assert.match(h.svg.children[0].attrs['aria-label'], new RegExp(` · ${n} ${n === 1 ? 'visit' : 'visits'}$`));
 }
 
 test('same-origin saved cities render before the blocked collector finishes and survive both failures', async () => {
@@ -142,7 +142,7 @@ test('local preview reads saved data but never posts or queries the collector', 
   h.calls[0].resolve(saved(1));
   await flush();
   assert.equal(h.map.attrs['aria-label'], 'Approximate visitor locations: 1 city');
-  assert.match(h.svg.children[0].attrs['aria-label'], /1 page view$/);
+  assert.match(h.svg.children[0].attrs['aria-label'], /1 visit$/);
 });
 
 test('snapshot and collector failure leave the cached timestamp and points visible', async () => {

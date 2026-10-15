@@ -100,7 +100,7 @@
       var country = p.cc;
       try { if (names) country = names.of(p.cc) || p.cc; } catch (e) {}
       var label = p.city + ', ' + country + ' · ' + p.n.toLocaleString('en-US') +
-        (p.n === 1 ? ' page view' : ' page views');
+        (p.n === 1 ? ' visit' : ' visits');
       dot.setAttribute('role', 'button');
       dot.setAttribute('tabindex', '0');
       dot.setAttribute('aria-label', label);
