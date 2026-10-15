@@ -91,9 +91,19 @@ have the same mask, baseline, and cutover. For each month, the largest known
 request charge is kept. For each day, the latest complete export replaces the
 older export; summaries are never added to each other. Missing cache files are
 normal; an existing invalid cache fails closed because its request charges
-cannot safely be discarded. If the remote state is unavailable, the validated
-local/cache state is retained and the command exits `2`. In that case publish
-the retained snapshot, but skip an API query until state restoration succeeds.
+cannot safely be discarded. If a network failure prevents reading remote state,
+only a validated restored cache permits retaining the snapshot with exit `2`;
+an old checked-in baseline alone is insufficient. A successfully downloaded
+but invalid or conflicting document always exits `1`, without replacing the
+public snapshot. This prevents a stale baseline from overwriting newer history
+or resetting known request charges.
+
+The first deployment has one narrow exception: an actual HTTP 404 may publish
+the genuine initial seed when it has no daily summaries, no request charges,
+and no previous attempt timestamp. It exits `2` and makes no API query. After
+publishing the initial state, a separate manual refresh can query the API.
+An HTTP 404 can also use an existing validated cache. In either exit-`2` case,
+publish the retained snapshot but skip an API query until restoration succeeds.
 
 For a scheduled or requested refresh, pass secrets only as environment
 variables `LA_ACCESS_KEY` and `LA_SECRET_KEY`:
@@ -143,8 +153,10 @@ provider allowance and must be included in this operational budget.
   or geolocation was unavailable. Safe to cache and deploy the retained files;
   inspect the fixed, non-sensitive reason in `coverage.lastOutcome`. Never
   interpret this as a completed daily fetch.
-- `1`: no valid durable state, invalid cache, or an unrecoverable local write
-  failure. Do not deploy new output. Preserve any valid charged state cache.
+- `1`: no valid durable state, invalid cache, downloaded state that is invalid
+  or conflicts with saved history, network failure without recovery cache, or
+  an unrecoverable local write failure. Do not deploy new output. Preserve any
+  valid charged state cache.
 
 `updatedAt` is the latest **successful** daily export (or the frozen baseline's
 timestamp). A failed attempt does not make old data appear fresh.

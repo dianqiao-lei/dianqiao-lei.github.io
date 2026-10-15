@@ -50,6 +50,13 @@ class SyncError(Exception):
         super().__init__(reason)
 
 
+class StateNotFound(SyncError):
+    """A real HTTP 404, distinct from invalid content or a transport failure."""
+
+    def __init__(self):
+        super().__init__("state_unavailable")
+
+
 def stamp(value):
     return value.astimezone(UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
@@ -297,20 +304,29 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
         raise SyncError("request_failed")
 
 
-def read_response(request, limit=MAX_BYTES):
+def read_response(request, limit=MAX_BYTES, state_request=False):
     try:
         with urllib.request.build_opener(NoRedirect).open(request, timeout=25) as response:
             if response.status != 200:
                 raise SyncError("request_failed")
             data = response.read(limit + 1)
-        if len(data) > limit:
-            raise SyncError("invalid_response")
-        return json.loads(data)
     except SyncError:
         raise
-    except (OSError, ValueError, UnicodeError, urllib.error.URLError):
+    except urllib.error.HTTPError as error:
+        if state_request and error.code == 404:
+            raise StateNotFound() from None
+        raise SyncError("request_failed") from None
+    except (OSError, urllib.error.URLError):
         # Exception text or response bodies could contain IPs or account values.
         raise SyncError("request_failed") from None
+    if len(data) > limit:
+        raise SyncError("invalid_response")
+    try:
+        return json.loads(data)
+    except (ValueError, UnicodeError):
+        # A downloaded malformed document is not a network outage. In
+        # particular it must not let a stale Git baseline replace live state.
+        raise SyncError("invalid_response") from None
 
 
 def fetch_state(url):
@@ -318,7 +334,7 @@ def fetch_state(url):
     if parts.scheme != "https" or not parts.netloc or parts.username or parts.password or parts.query or parts.fragment:
         raise SyncError("state_unavailable")
     request = urllib.request.Request(url, headers={"Accept": "application/json", "Cache-Control": "no-cache"})
-    return read_response(request, MAX_STATE_BYTES)
+    return read_response(request, MAX_STATE_BYTES, state_request=True)
 
 
 def signed_payload(access_key, secret_key, mask_id, day, page, now=None, nonce=None):
@@ -572,7 +588,7 @@ def main(argv=None):
     args = parse_args(argv)
     now, state = datetime.now(UTC), None
     lock = args.state.with_name(args.state.name + ".lock")
-    locked = False
+    locked, cached_recovery = False, False
     try:
         args.state.parent.mkdir(parents=True, exist_ok=True)
         descriptor = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
@@ -585,6 +601,7 @@ def main(argv=None):
                 cached = validate_state(load_json(args.cache_state), now, args.mask_id)
                 state = merge_states(state, cached)
                 atomic_json(args.state, state)
+                cached_recovery = True
             except Exception:
                 print("51.LA snapshot: cached aggregate state is invalid; refusing to reset its request ledger.", file=sys.stderr)
                 return 1
@@ -595,11 +612,35 @@ def main(argv=None):
             atomic_json(args.state, state)
         elif args.state_url:
             try:
-                remote = validate_state(fetch_state(args.state_url), now, args.mask_id)
-                state = merge_states(state, remote)
-                atomic_json(args.state, state)
+                downloaded = fetch_state(args.state_url)
+            except StateNotFound:
+                initial_seed = (state is not None and not state["days"] and
+                                not any(state["requests"].values()) and state["lastAttemptAt"] is None)
+                if initial_seed or cached_recovery:
+                    # The explicit, genuine seed may be deployed before the
+                    # public state file exists. A 404 never causes an API query.
+                    raise SyncError("state_unavailable") from None
+                print("51.LA snapshot: published state is missing and no validated cache can recover it.", file=sys.stderr)
+                return 1
+            except SyncError as error:
+                if error.reason == "request_failed" and cached_recovery:
+                    raise SyncError("state_unavailable") from None
+                print("51.LA snapshot: published state could not be safely restored; refusing to replace it.", file=sys.stderr)
+                return 1
             except Exception:
-                raise SyncError("state_unavailable") from None
+                print("51.LA snapshot: unexpected state restoration failure; refusing to replace published history.", file=sys.stderr)
+                return 1
+            else:
+                try:
+                    remote = validate_state(downloaded, now, args.mask_id)
+                    restored = merge_states(state, remote)
+                except Exception:
+                    # A successfully downloaded but invalid/conflicting ledger
+                    # must never be overwritten by an older checkout/cache.
+                    print("51.LA snapshot: published state is invalid or conflicts with saved history; deployment must stop.", file=sys.stderr)
+                    return 1
+                state = restored
+                atomic_json(args.state, state)
         if state is None:
             raise SyncError("state_unavailable")
         if args.restore_only:
