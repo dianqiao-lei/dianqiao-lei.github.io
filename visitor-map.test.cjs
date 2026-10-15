@@ -5,6 +5,7 @@ const fs = require('node:fs');
 const source = fs.readFileSync(require('node:path').join(__dirname, 'visitor-map.js'), 'utf8');
 const NOW = '2026-10-15T12:00:00.000Z';
 const CACHE = 'visitor-map-public-v1';
+const DAILY_CACHE = 'visitor-map-daily-v1';
 const ENDPOINT = 'https://collector.example.invalid';
 const live = (n = 3) => ({
   places: [{ city: 'Beijing', cc: 'CN', lat: 39.9, lon: 116.4, n }],
@@ -13,7 +14,7 @@ const live = (n = 3) => ({
 const saved = (n = 3, updatedAt = '2026-10-15T10:00:00.000Z') => ({ ...live(n), updatedAt });
 const flush = async () => { await new Promise(setImmediate); await new Promise(setImmediate); };
 
-function harness({ cache, production = true, fetchAvailable = true, snapshot = 'visitor-locations.json', storageDenied = false, abortAvailable = true } = {}) {
+function harness({ cache, dailyCache, daily = false, endpoint = ENDPOINT, production = true, fetchAvailable = true, snapshot = 'visitor-locations.json', storageDenied = false, abortAvailable = true } = {}) {
   const nodes = [];
   function node() {
     return { attrs: {}, style: {}, events: {}, hidden: false, textContent: '',
@@ -29,11 +30,12 @@ function harness({ cache, production = true, fetchAvailable = true, snapshot = '
   const tip = node();
   const status = node();
   const map = node();
-  map.attrs = { 'data-endpoint': ENDPOINT, 'data-snapshot': snapshot };
+  map.attrs = { 'data-endpoint': endpoint, 'data-snapshot': snapshot, 'data-refresh': daily ? 'daily' : undefined };
   map.getAttribute = name => map.attrs[name];
   map.querySelector = name => name === 'svg' ? svg : name === '.visitor-map__tip' ? tip : null;
   const location = new URL(production ? 'https://dianqiao-lei.github.io/#service' : 'http://127.0.0.1:8000/#service');
   const storage = new Map(cache ? [[CACHE, typeof cache === 'string' ? cache : JSON.stringify(cache)]] : []);
+  if (dailyCache) storage.set(DAILY_CACHE, typeof dailyCache === 'string' ? dailyCache : JSON.stringify(dailyCache));
   const localStorage = {
     getItem(key) { if (storageDenied) throw new Error('Storage denied'); return storage.get(key) || null; },
     setItem(key, value) { if (storageDenied) throw new Error('Storage denied'); storage.set(key, value); }
@@ -268,4 +270,38 @@ test('an empty genuine database shows an empty state without inventing a point o
   assert.equal(h.svg.children.length, 0);
   assert.match(h.status.textContent, /No city-level visits recorded yet · saved/);
   assert.equal(h.map.attrs['aria-label'], 'Approximate visitor locations: 0 cities');
+});
+
+
+test('production daily mode reads only the homepage snapshot and ignores legacy collector cache', async () => {
+  // Even a leftover endpoint attribute must not revive Cloudflare requests.
+  const h = harness({ daily: true, cache: saved(99) });
+  assert.equal(h.svg.children.length, 0, 'legacy source cache is isolated');
+  await flush();
+  assert.equal(h.calls.length, 1);
+  assert.equal(h.calls[0].url, 'https://dianqiao-lei.github.io/visitor-locations.json');
+  assert.equal(h.calls[0].options.method, 'GET');
+  assert.equal(h.calls[0].options.mode, 'same-origin');
+  h.calls[0].resolve(saved(13));
+  await flush();
+  markerCount(h, 13);
+  assert.match(h.status.textContent, /updated daily · saved Oct 15, 2026, 10:00 UTC/);
+  assert.equal(JSON.parse(h.storage.get(DAILY_CACHE)).mappedPageviews, 13);
+  assert.equal(JSON.parse(h.storage.get(CACHE)).mappedPageviews, 99, 'legacy cache remains untouched');
+  assert.equal(h.calls.length, 1, 'no POST or collector read is attempted');
+});
+
+test('daily mode without a collector retains its own saved cache and timestamp when snapshot loading fails', async () => {
+  const original = saved(15, '2026-10-15T11:00:00.000Z');
+  const h = harness({ daily: true, endpoint: null, cache: saved(99), dailyCache: original });
+  markerCount(h, 15);
+  assert.match(h.status.textContent, /updated daily · saved Oct 15, 2026, 11:00 UTC/);
+  await flush();
+  assert.equal(h.calls.length, 1);
+  h.calls[0].reject(new Error('Snapshot temporarily unavailable'));
+  await flush();
+  markerCount(h, 15);
+  assert.match(h.status.textContent, /updated daily · saved Oct 15, 2026, 11:00 UTC/);
+  assert.deepEqual(JSON.parse(h.storage.get(DAILY_CACHE)), original);
+  assert.equal(h.calls.length, 1);
 });

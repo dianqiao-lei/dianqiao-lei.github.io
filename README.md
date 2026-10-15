@@ -17,7 +17,7 @@ The page is plain static HTML/CSS/JS. Its public address is [dianqiao-lei.github
 ## GitHub Pages deployment
 
 1. Upload the contents of this folder to [dianqiao-lei/dianqiao-lei.github.io](https://github.com/dianqiao-lei/dianqiao-lei.github.io).
-2. Set **Settings → Pages → Source → GitHub Actions**. `.github/workflows/pages.yml` tests and publishes the static site on main-branch updates, manual runs, and an hourly schedule.
+2. Set **Settings → Pages → Source → GitHub Actions**. `.github/workflows/pages.yml` tests and publishes the static site on main-branch updates, manual runs, and a daily schedule at 10:23 Beijing time. Ordinary source updates preserve the saved map without querying the analytics API.
 3. Leave **Custom domain** empty to use the default GitHub Pages address. The workflow copies only public homepage assets into the deployment artifact.
 
 ## Search visibility
@@ -42,18 +42,46 @@ The count shows `Unavailable` if the service cannot be reached; no fallback numb
 
 ### Visitor city map
 
-The existing dotted map now draws real, approximate city locations through the independent [Cloudflare Worker API](https://dianqiao-visitor-stats.leidq51.workers.dev/api/visitors). The homepage remains on GitHub Pages. `visitor-map.js` records one view per production page load and uses the returned city aggregates to size the dots. Hover, click or focus a dot to see the city, country and page-view count. Local previews never record a visit.
+New visits are collected by [51.LA V6](https://v6.51.la/). The homepage loads its
+SDK asynchronously only on `https://dianqiao-lei.github.io`; local previews do
+not load it. The project uses strict domain matching. Event auto-tracking,
+hash-change tracking and screen recording are explicitly disabled. 51.LA still
+receives basic visit information, including IP/browser information, and uses
+browser identifiers; it is not a city-only or cookie-free collector. Its public
+SDK ID is separate from the administrative API secrets stored in GitHub Secrets.
 
-The map service uses Cloudflare IP geolocation and stores only city-level aggregate counts, rounded coordinates, an unknown-location count and the first recorded visit time. It stores no raw IP address, user agent or per-visit log. A VPN may place a visit in its exit city; missing locations do not produce invented points. Both the map caption and API report when map counting began. Map counts and Busuanzi Total Views have independent start times and coverage, so they need not match.
+The map reads `visitor-locations.json` from the **same origin as the homepage**
+and a validated browser cache. It no longer requires visitors to reach the
+Cloudflare Worker to display saved points. Hover, click or focus a point to see
+its approximate city and page-view count. Saved points remain visible if a
+refresh fails, with their actual update timestamp; no sample locations are added.
 
-The tested Worker source, empty schema, migration and deployment details live in [`visitor-stats/`](visitor-stats/README.md). Workers Logs and Traces are disabled for this service. The map independently loads `visitor-locations.json` from the homepage origin and a validated browser cache before contacting the live API. A network failure retains genuine historical points and shows their saved time; it never replaces them with invented locations. The existing Total Views counter continues independently.
+The daily Pages workflow queries 51.LA's historical sessions, resolves IPs
+against an offline DB-IP City Lite database, and publishes only city-level
+aggregates with coordinates rounded to one decimal place. Raw session records,
+IPs, browser identifiers, URLs and API secrets are never saved in the published
+files or workflow artifacts. The homepage includes the required DB-IP
+attribution. A VPN may locate a visit at its exit city; unresolved locations
+remain unplotted rather than being assigned a guessed city.
 
-The Pages workflow refreshes the public aggregate snapshot hourly with read-only requests. It retains the last valid published snapshot if the API is unavailable. Scheduled runs may be delayed, so the displayed timestamp is the source of truth. See [`scripts/README.md`](scripts/README.md) for validation and recovery details. This improves display availability but cannot recover new visits that never reach the collector.
+Migration uses a fixed real snapshot of the old Cloudflare counts and an
+explicit boundary, `2026-10-15T13:19:58.040Z`. Only eligible 51.LA sessions after
+that boundary contribute new counts. A day's export **replaces** that day's
+previous export; it is not added twice. The old Worker's subsequently changing
+total is never added to the new stream. `visitor-51la-state.json` preserves the
+baseline, daily city summaries and API request budget between deployments.
 
-A proposed self-hosted replacement lives in `visitor-server/`, but is **not active**. Setup stopped because the server's public HTTP port was unreachable during certificate validation. The homepage still uses the Cloudflare endpoint. Do not change the endpoint to the server IP or rerun its bootstrap without resolving and reviewing the deployment first; the owner has chosen to pursue a hosted alternative instead of requesting server network changes.
+Scheduled synchronization settles yesterday's data; a manual refresh can also
+include today's provisional visits. The workflow limits itself to 90 of the
+provider's 100 free API calls per month, with at most three requests per run.
+It preserves valid points on API, quota or database-download failures. GitHub
+schedules may run late, so use the displayed timestamp to judge freshness.
+Map counts and the independent Busuanzi Total Views have different coverage and
+need not match. Missing historical visits cannot be reconstructed.
 
-### Mainland-friendly hosted collection
-
-The homepage also initializes [51.LA V6](https://v6.51.la/) for its own HTTPS hostname only. The SDK loads asynchronously, with event auto-tracking, hash-change tracking, and screen recording explicitly disabled. Local previews do not load it. 51.LA receives basic visit information (including IP/browser information) and uses browser identifiers; it is not a city-only or cookie-free collector. The public SDK ID is not an administrative API secret.
-
-The 51.LA project is bound to `dianqiao-lei.github.io` with strict domain matching. At this stage, collecting data in the hosted dashboard and exporting it onto the custom city map are separate: automatic map import is not yet configured. The map continues to read its existing Cloudflare aggregates and saved public snapshot until that import is validated.
+See [`scripts/README.md`](scripts/README.md) for the workflow and
+[`scripts/51la-README.md`](scripts/51la-README.md) for pagination, quota, recovery
+and migration details. The original Worker in `visitor-stats/` and the unused
+self-hosted proposal in `visitor-server/` are retained as source references;
+neither is required by the daily map pipeline. Do not rerun their deployment
+tools or add their live counters to the saved 51.LA state.

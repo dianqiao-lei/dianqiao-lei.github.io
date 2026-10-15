@@ -1,0 +1,28 @@
+{
+  "version": 1,
+  "source": "51la",
+  "maskId": "3RWElwTgQjmTbrIQ",
+  "cutoverAt": "2026-10-15T13:19:58.040Z",
+  "startDate": "2026-10-15",
+  "baseline": {
+    "places": [
+      {
+        "lat": 34.1,
+        "lon": -118.2,
+        "cc": "US",
+        "city": "Los Angeles",
+        "n": 13
+      }
+    ],
+    "mappedPageviews": 13,
+    "unmappedPageviews": 0,
+    "startedAt": "2026-10-15T12:26:19.968Z",
+    "updatedAt": "2026-10-15T13:12:45.182Z"
+  },
+  "days": {},
+  "requests": {
+    "2026-10": 0
+  },
+  "lastAttemptAt": null,
+  "lastOutcome": "initialized"
+}

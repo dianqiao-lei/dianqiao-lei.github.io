@@ -1,5 +1,5 @@
-/* Genuine city aggregates: show the saved same-origin copy independently of
-   the live collector. Only production page loads record a view; never retry a write. */
+/* Genuine city aggregates: daily mode reads a saved same-origin snapshot only.
+   Legacy live mode records production page views without retrying writes. */
 (function () {
   var map = document.getElementById('visitor-map');
   var status = document.getElementById('visitor-map-status');
@@ -9,7 +9,9 @@
   if (!svg || !tip) return;
   var endpoint = map.getAttribute('data-endpoint');
   var production = location.hostname === 'dianqiao-lei.github.io';
-  var cacheKey = 'visitor-map-public-v1';
+  var daily = map.getAttribute('data-refresh') === 'daily';
+  // Keep the new daily source separate from cached legacy collector totals.
+  var cacheKey = daily ? 'visitor-map-daily-v1' : 'visitor-map-public-v1';
   var current = null;
   var pending = 0;
 
@@ -130,7 +132,7 @@
     map.setAttribute('aria-label', 'Approximate visitor locations: ' + plotted +
       (plotted === 1 ? ' city' : ' cities'));
     var label = plotted ? 'Approximate visitor locations' : 'No city-level visits recorded yet';
-    status.textContent = label + (saved
+    status.textContent = label + (daily ? ' · updated daily' : '') + (saved
       ? ' · saved ' + displayDate(data.updatedAt, true)
       : (data.startedAt ? ' · since ' + displayDate(data.startedAt, false) : '.'));
   }
@@ -201,7 +203,7 @@
     }
   } catch (e) {}
 
-  if (endpoint && production) {
+  if (endpoint && production && !daily) {
     pending += 1;
     var base = endpoint.replace(/\/$/, '');
     // Never retry a write: a failed or timed-out POST may already have counted.
