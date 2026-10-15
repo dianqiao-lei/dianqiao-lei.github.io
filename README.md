@@ -17,8 +17,8 @@ The page is plain static HTML/CSS/JS. Its public address is [dianqiao-lei.github
 ## GitHub Pages deployment
 
 1. Upload the contents of this folder to [dianqiao-lei/dianqiao-lei.github.io](https://github.com/dianqiao-lei/dianqiao-lei.github.io).
-2. Enable **Settings → Pages → Deploy from a branch** for the `main` branch and `/ (root)`.
-3. Leave **Custom domain** empty to use the default GitHub Pages address. The `.nojekyll` file enables plain static-file publishing.
+2. Set **Settings → Pages → Source → GitHub Actions**. `.github/workflows/pages.yml` tests and publishes the static site on main-branch updates, manual runs, and an hourly schedule.
+3. Leave **Custom domain** empty to use the default GitHub Pages address. The workflow copies only public homepage assets into the deployment artifact.
 
 ## Search visibility
 
@@ -46,4 +46,14 @@ The existing dotted map now draws real, approximate city locations through the i
 
 The map service uses Cloudflare IP geolocation and stores only city-level aggregate counts, rounded coordinates, an unknown-location count and the first recorded visit time. It stores no raw IP address, user agent or per-visit log. A VPN may place a visit in its exit city; missing locations do not produce invented points. Both the map caption and API report when map counting began. Map counts and Busuanzi Total Views have independent start times and coverage, so they need not match.
 
-The tested Worker source, empty schema, migration and deployment details live in [`visitor-stats/`](visitor-stats/README.md). Workers Logs and Traces are disabled for this service. If the map API is unavailable, a status message is shown and the existing Total Views counter continues independently.
+The tested Worker source, empty schema, migration and deployment details live in [`visitor-stats/`](visitor-stats/README.md). Workers Logs and Traces are disabled for this service. The map independently loads `visitor-locations.json` from the homepage origin and a validated browser cache before contacting the live API. A network failure retains genuine historical points and shows their saved time; it never replaces them with invented locations. The existing Total Views counter continues independently.
+
+The Pages workflow refreshes the public aggregate snapshot hourly with read-only requests. It retains the last valid published snapshot if the API is unavailable. Scheduled runs may be delayed, so the displayed timestamp is the source of truth. See [`scripts/README.md`](scripts/README.md) for validation and recovery details. This improves display availability but cannot recover new visits that never reach the collector.
+
+A proposed self-hosted replacement lives in `visitor-server/`, but is **not active**. Setup stopped because the server's public HTTP port was unreachable during certificate validation. The homepage still uses the Cloudflare endpoint. Do not change the endpoint to the server IP or rerun its bootstrap without resolving and reviewing the deployment first; the owner has chosen to pursue a hosted alternative instead of requesting server network changes.
+
+### Mainland-friendly hosted collection
+
+The homepage also initializes [51.LA V6](https://v6.51.la/) for its own HTTPS hostname only. The SDK loads asynchronously, with event auto-tracking, hash-change tracking, and screen recording explicitly disabled. Local previews do not load it. 51.LA receives basic visit information (including IP/browser information) and uses browser identifiers; it is not a city-only or cookie-free collector. The public SDK ID is not an administrative API secret.
+
+The 51.LA project is bound to `dianqiao-lei.github.io` with strict domain matching. At this stage, collecting data in the hosted dashboard and exporting it onto the custom city map are separate: automatic map import is not yet configured. The map continues to read its existing Cloudflare aggregates and saved public snapshot until that import is validated.

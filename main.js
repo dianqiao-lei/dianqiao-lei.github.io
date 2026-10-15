@@ -524,6 +524,30 @@ function pageScale() {
   document.head.appendChild(script);
 })();
 
+/* Basic 51.LA page analytics. Only the public HTTPS homepage loads this SDK;
+   event auto-tracking, hash tracking, and screen recording stay disabled. */
+(function () {
+  if (location.hostname !== 'dianqiao-lei.github.io' || location.protocol !== 'https:' ||
+      window.__homepage51LaStarted) return;
+  window.__homepage51LaStarted = true;
+
+  var initialized = false;
+  var script = document.createElement('script');
+  script.id = 'homepage-51la-sdk';
+  script.src = 'https://sdk.51.la/js-sdk-pro.min.js';
+  script.async = true;
+  script.onload = function () {
+    if (initialized || !window.LA || typeof window.LA.init !== 'function') return;
+    initialized = true;
+    try {
+      window.LA.init({ id: '3RWElwTgQjmTbrIQ', ck: '3RWElwTgQjmTbrIQ',
+        hashMode: false, autoTrack: false, screenRecord: false });
+    } catch (e) { /* Optional analytics must not interrupt the homepage. */ }
+  };
+  script.onerror = function () { /* Leave the homepage usable if the SDK is blocked. */ };
+  document.head.appendChild(script);
+})();
+
 /* Reveal on scroll: blocks that start below the fold fade up as they come into
    view, in document order. Blocks already on screen are never hidden, so the
    first screen does not flash, and without this script nothing is hidden. */
