@@ -478,7 +478,7 @@ function pageScale() {
 
 /* Site page views from the public soxft/Busuanzi service. Only the published
    hostname is counted; local previews never load the third-party script.
-   The world map is decorative: this service does not return visitor locations. */
+   City-level visitor statistics are handled separately by visitor-map.js. */
 (function () {
   var views = document.querySelector('.site-views');
   var count = document.getElementById('busuanzi_site_pv');

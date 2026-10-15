@@ -47,3 +47,8 @@ a:focus{outline:none}*,*:before,*:after{-moz-box-sizing:border-box;-webkit-box-s
   line-height:1.45;
 }
 .page__content .pub-list .pub-highlights{margin-top:4px;}
+
+/* City-level visitor statistics, layered over the existing dotted map. */
+.visitor-map__status{font-size:var(--fs-xs);color:var(--subtle);margin:-8px 0 12px;text-align:center;}
+.visitor-map__tip{max-width:100%;white-space:normal;text-align:center;box-sizing:border-box;}
+.visitor-map circle:focus-visible{outline:none;fill-opacity:1;stroke:var(--sl-blue);stroke-width:2.4;}
