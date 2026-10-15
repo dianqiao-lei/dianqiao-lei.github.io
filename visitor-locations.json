@@ -1,0 +1,15 @@
+{
+  "places": [
+    {
+      "lat": 34.1,
+      "lon": -118.2,
+      "cc": "US",
+      "city": "Los Angeles",
+      "n": 13
+    }
+  ],
+  "mappedPageviews": 13,
+  "unmappedPageviews": 0,
+  "startedAt": "2026-10-15T12:26:19.968Z",
+  "updatedAt": "2026-10-15T13:12:45.182Z"
+}

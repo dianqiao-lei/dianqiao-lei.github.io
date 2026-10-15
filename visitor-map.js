@@ -1,17 +1,18 @@
-/* Approximate visitor cities from our Cloudflare Worker. No demo markers.
-   The endpoint stores only city-level aggregates; each page load is one view. */
+/* Genuine city aggregates: show the saved same-origin copy independently of
+   the live collector. Only production page loads record a view; never retry a write. */
 (function () {
   var map = document.getElementById('visitor-map');
   var status = document.getElementById('visitor-map-status');
-  if (!map || !status || !window.fetch) return;
-  var endpoint = map.getAttribute('data-endpoint');
-  if (!endpoint || location.hostname !== 'dianqiao-lei.github.io') {
-    status.textContent = 'Visitor location tracking is disabled in this preview.';
-    return;
-  }
-
+  if (!map || !status) return;
   var svg = map.querySelector('svg');
   var tip = map.querySelector('.visitor-map__tip');
+  if (!svg || !tip) return;
+  var endpoint = map.getAttribute('data-endpoint');
+  var production = location.hostname === 'dianqiao-lei.github.io';
+  var cacheKey = 'visitor-map-public-v1';
+  var current = null;
+  var pending = 0;
+
   var names = window.Intl && Intl.DisplayNames
     ? new Intl.DisplayNames(['en'], { type: 'region' }) : null;
 
@@ -25,16 +26,61 @@
       (y + 12671671.123330014) / 19602063.148465134 * 440.70631074413296];
   }
 
-  function draw(data) {
-    if (!data || !Array.isArray(data.places)) throw new Error('Invalid visitor data');
-    var places = data.places.filter(function (p) {
-      return p && typeof p === 'object' && Number.isFinite(p.lat) && Number.isFinite(p.lon) &&
-        Math.abs(p.lat) <= 90 && Math.abs(p.lon) <= 180 &&
-        (p.lat !== 0 || p.lon !== 0) &&
-        Number.isSafeInteger(p.n) && p.n > 0 &&
-        typeof p.city === 'string' && p.city.trim().length > 0 &&
-        typeof p.cc === 'string' && /^[A-Z]{2}$/.test(p.cc);
+  function timestamp(value) {
+    if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(value)) {
+      throw new Error('Invalid statistics date');
+    }
+    var date = new Date(value);
+    if (!Number.isFinite(date.getTime()) || date.toISOString() !== value ||
+        date.getTime() > Date.now() + 300000) throw new Error('Invalid statistics date');
+    return value;
+  }
+
+  // Reject the whole response if any city or total is malformed. Copy only the
+  // public aggregate fields, so neither extra response fields nor IPs enter cache.
+  function validate(data, saved) {
+    if (!data || typeof data !== 'object' || Array.isArray(data) ||
+        !Array.isArray(data.places) || data.places.length > 20000) throw new Error('Invalid visitor data');
+    var sum = 0;
+    var places = data.places.map(function (p) {
+      if (!p || typeof p !== 'object' || Array.isArray(p) ||
+          !Number.isFinite(p.lat) || !Number.isFinite(p.lon) ||
+          Math.abs(p.lat) > 90 || Math.abs(p.lon) > 180 || (p.lat === 0 && p.lon === 0) ||
+          !Number.isSafeInteger(p.n) || p.n <= 0 ||
+          typeof p.city !== 'string' || !p.city.trim() || p.city.length > 120 ||
+          /[\u0000-\u001f\u007f]/.test(p.city) ||
+          typeof p.cc !== 'string' || !/^[A-Z]{2}$/.test(p.cc) || p.cc === 'XX') {
+        throw new Error('Invalid city record');
+      }
+      sum += p.n;
+      if (!Number.isSafeInteger(sum)) throw new Error('Invalid visitor total');
+      return { lat: p.lat, lon: p.lon, cc: p.cc, city: p.city.trim(), n: p.n };
     });
+    if (!Number.isSafeInteger(data.mappedPageviews) || data.mappedPageviews < 0 ||
+        !Number.isSafeInteger(data.unmappedPageviews) || data.unmappedPageviews < 0 ||
+        data.mappedPageviews !== sum ||
+        !Number.isSafeInteger(sum + data.unmappedPageviews)) throw new Error('Invalid visitor totals');
+    var startedAt = data.startedAt === null && sum + data.unmappedPageviews === 0
+      ? null : timestamp(data.startedAt);
+    var updatedAt = saved || Object.prototype.hasOwnProperty.call(data, 'updatedAt')
+      ? timestamp(data.updatedAt) : new Date().toISOString();
+    if (startedAt && startedAt > updatedAt) throw new Error('Invalid statistics date order');
+    return { places: places, mappedPageviews: sum, unmappedPageviews: data.unmappedPageviews,
+      startedAt: startedAt, updatedAt: updatedAt };
+  }
+
+  function displayDate(value, includeTime) {
+    var options = { month: 'short', day: 'numeric', year: 'numeric', timeZone: 'UTC' };
+    if (includeTime) {
+      options.hour = '2-digit';
+      options.minute = '2-digit';
+      options.hour12 = false;
+    }
+    return new Date(value).toLocaleString('en-US', options) + (includeTime ? ' UTC' : '');
+  }
+
+  function draw(data, saved) {
+    var places = data.places.slice();
     svg.replaceChildren();
     tip.hidden = true;
     var plotted = 0;
@@ -81,40 +127,93 @@
       svg.appendChild(dot);
       plotted += 1;
     });
-    map.setAttribute('aria-label', 'Approximate visitor locations: ' + plotted + ' cities');
-    var since = '';
-    if (typeof data.startedAt === 'string' && /^\d{4}-\d{2}-\d{2}/.test(data.startedAt)) {
-      var started = new Date(data.startedAt.slice(0, 10) + 'T00:00:00Z');
-      if (!isNaN(started.getTime())) since = ' · since ' + started.toLocaleDateString('en-US', {
-        month: 'short', day: 'numeric', year: 'numeric', timeZone: 'UTC'
-      });
-    }
-    status.textContent = plotted
-      ? 'Approximate visitor locations' + since
-      : 'No city-level visits recorded yet.';
+    map.setAttribute('aria-label', 'Approximate visitor locations: ' + plotted +
+      (plotted === 1 ? ' city' : ' cities'));
+    var label = plotted ? 'Approximate visitor locations' : 'No city-level visits recorded yet';
+    status.textContent = label + (saved
+      ? ' · saved ' + displayDate(data.updatedAt, true)
+      : (data.startedAt ? ' · since ' + displayDate(data.startedAt, false) : '.'));
   }
 
-  function request(path, method) {
-    var controller = new AbortController();
-    var timeout = setTimeout(function () { controller.abort(); }, 12000);
-    return fetch(endpoint.replace(/\/$/, '') + path, {
-      method: method,
-      mode: 'cors',
-      credentials: 'omit',
-      referrerPolicy: 'origin',
-      cache: 'no-store',
-      signal: controller.signal
-    }).then(function (response) {
+  function accept(input, saved) {
+    var data = validate(input, saved);
+    if (current) {
+      // The collector may finish before a slow snapshot fetch. Once live data is
+      // displayed, never replace it with a saved copy; never roll counters back.
+      if ((!current.saved && saved) || data.mappedPageviews < current.data.mappedPageviews ||
+          data.unmappedPageviews < current.data.unmappedPageviews ||
+          (saved && data.updatedAt < current.data.updatedAt)) return;
+    }
+    draw(data, saved);
+    current = { data: data, saved: saved };
+    try { window.localStorage.setItem(cacheKey, JSON.stringify(data)); } catch (e) {}
+  }
+
+  function request(url, method, sameOrigin) {
+    var controller = window.AbortController ? new AbortController() : null;
+    var timeout;
+    // Explicit rejection also bounds older browsers without AbortController.
+    var expired = new Promise(function (_, reject) {
+      timeout = setTimeout(function () {
+        if (controller) controller.abort();
+        reject(new Error('Visitor statistics timed out'));
+      }, 12000);
+    });
+    var options = { method: method, mode: sameOrigin ? 'same-origin' : 'cors',
+      credentials: 'omit', referrerPolicy: 'origin', cache: 'no-store' };
+    if (controller) options.signal = controller.signal;
+    var fetched = Promise.resolve().then(function () { return fetch(url, options); }).then(function (response) {
       if (!response.ok) throw new Error('Visitor statistics unavailable');
       return response.json();
-    }).finally(function () { clearTimeout(timeout); });
+    });
+    return Promise.race([fetched, expired]).finally(function () { clearTimeout(timeout); });
+  }
+
+  function finished() {
+    pending -= 1;
+    if (!pending && !current) {
+      status.textContent = production
+        ? 'Visitor locations are temporarily unavailable.'
+        : 'No saved visitor locations are available in this preview.';
+    }
   }
 
   status.textContent = 'Loading visitor locations…';
-  // Never retry a write: a timed-out request may already have been counted.
-  request('/api/visit', 'POST').then(draw).catch(function () {
-    return request('/api/visitors', 'GET').then(draw);
-  }).catch(function () {
-    status.textContent = 'Visitor locations are temporarily unavailable.';
-  });
+  try {
+    var cached = window.localStorage.getItem(cacheKey);
+    if (cached) accept(JSON.parse(cached), true);
+  } catch (e) {}
+  if (!window.fetch) {
+    if (!current) status.textContent = 'Visitor locations are unavailable in this browser.';
+    return;
+  }
+
+  // This file travels with the homepage, so saved cities remain available even
+  // when the visitor's network cannot reach the live statistics service.
+  var snapshot = map.getAttribute('data-snapshot');
+  try {
+    var snapshotURL = snapshot ? new URL(snapshot, location.href) : null;
+    if (snapshotURL && snapshotURL.origin === location.origin &&
+        /^https?:$/.test(snapshotURL.protocol) && !snapshotURL.username && !snapshotURL.password) {
+      pending += 1;
+      request(snapshotURL.href, 'GET', true).then(function (data) { accept(data, true); })
+        .catch(function () {}).finally(finished);
+    }
+  } catch (e) {}
+
+  if (endpoint && production) {
+    pending += 1;
+    var base = endpoint.replace(/\/$/, '');
+    // Never retry a write: a failed or timed-out POST may already have counted.
+    request(base + '/api/visit', 'POST', false).then(function (data) { accept(data, false); })
+      .catch(function () {
+        return request(base + '/api/visitors', 'GET', false)
+          .then(function (data) { accept(data, false); });
+      }).catch(function () {}).finally(finished);
+  }
+  if (!pending && !current) {
+    status.textContent = production ? 'Visitor locations are temporarily unavailable.'
+      : 'Visitor location tracking is disabled in this preview.';
+  }
+
 })();
