@@ -476,124 +476,52 @@ function pageScale() {
   if (document.fonts && document.fonts.ready) document.fonts.ready.then(layout);
 })();
 
-/* Visitor map and Total Views in the footer, from the site's own counter: a
-   Cloudflare Worker on the site's domain (worker/; /api/visit, /api/visitors).
-   The Worker locates each visit by city, so visits from mainland China count
-   too, which the third-party map widget used before missed. Each page load counts
-   as a view, and once per browser per day as a visit from its place; only on the
-   published domain, so previews do not count. The map shows every place since
-   counting began; the more visits, the larger and deeper blue its marker. The
-   map uses the same 900 x 409 projection as the reference site. */
+/* Site page views from the public soxft/Busuanzi service. Only the published
+   hostname is counted; local previews never load the third-party script.
+   The world map is decorative: this service does not return visitor locations. */
 (function () {
-  var map = document.getElementById('visitor-map');
   var views = document.querySelector('.site-views');
-  if (!window.fetch || (!map && !views)) return;
+  var count = document.getElementById('busuanzi_site_pv');
+  if (!views || !count) return;
 
-  // Keep the map useful on a personal domain before a visitor-count endpoint
-  // is configured. These are clearly labelled example locations, not copied
-  // visitor statistics from the reference site.
-  var fallbackPlaces = [
-    { lat: 39.9042, lon: 116.4074, cc: 'CN', city: 'Beijing', n: 1 },
-    { lat: 51.7520, lon: -1.2577, cc: 'GB', city: 'Oxford', n: 1 },
-    { lat: 1.3521, lon: 103.8198, cc: 'SG', city: 'Singapore', n: 1 },
-    { lat: 37.7749, lon: -122.4194, cc: 'US', city: 'San Francisco', n: 1 },
-    { lat: 40.7128, lon: -74.0060, cc: 'US', city: 'New York', n: 1 }
-  ];
-
-  if (location.hostname === 'chenyanzhe.page') {
-    var first = true;
-    try {
-      first = Date.now() - (+localStorage.getItem('visit:last') || 0) > 864e5;
-      if (first) localStorage.setItem('visit:last', Date.now());
-    } catch (e) {}
-    fetch('/api/visit', {
-      method: 'POST',
-      keepalive: true,
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ first: first }),
-    }).catch(function () {});
+  if (location.hostname !== 'dianqiao-lei.github.io') {
+    count.textContent = 'Not counted in preview';
+    return;
   }
 
-  fetch('/api/visitors', { headers: { accept: 'application/json' } })
-    .then(function (r) { return r.ok ? r.json() : null; })
-    .then(function (data) {
-      if (!data) {
-        if (map) draw(fallbackPlaces);
-        return;
-      }
-      if (views && data.pageviews > 0) {
-        views.querySelector('.site-views__n').textContent = data.pageviews.toLocaleString('en-US');
-        views.hidden = false;
-      }
-      if (map) draw(data.places && data.places.length ? data.places : fallbackPlaces);
-    })
-    .catch(function () {
-      if (map) draw(fallbackPlaces);
-    });
+  count.textContent = 'Loading…';
+  views.setAttribute('aria-busy', 'true');
 
-  // jVectorMap's world_mill frame: Miller projection, central meridian 11.5,
-  // 900 x 440.7 (the land image is cropped to 409 high)
-  function project(lat, lon) {
-    var R = 6381372, D = Math.PI / 180;
-    if (lon < -168.5) lon += 360;
-    var x = R * (lon - 11.5) * D;
-    var y = -R * Math.log(Math.tan((45 + 0.4 * lat) * D)) / 0.8;
-    return [(x + 20004297.151525836) / 40030869.546275226 * 900,
-            (y + 12671671.123330014) / 19602063.148465134 * 440.70631074413296];
+  function unavailable() {
+    count.textContent = 'Unavailable';
+    views.setAttribute('aria-busy', 'false');
   }
 
-  function draw(places) {
-    var svg = map.querySelector('svg'), tip = map.querySelector('.visitor-map__tip');
-    var names = window.Intl && Intl.DisplayNames ? new Intl.DisplayNames(['en'], { type: 'region' }) : null;
-    function country(cc) {
-      try { return (names && names.of(cc)) || cc; } catch (e) { return cc; }
-    }
-    // from the light blue of a single visit to the headings' blue at 50 or more,
-    // on a log scale, so one busy place does not wash out all the others
-    var LIGHT = [122, 167, 217], DEEP = [34, 75, 119];   // #7aa7d9, #224b77
-    function shade(n) {
-      var t = Math.min(1, Math.log(Math.max(1, n)) / Math.log(50));
-      return 'rgb(' + LIGHT.map(function (c, i) { return Math.round(c + (DEEP[i] - c) * t); }).join(',') + ')';
-    }
-    // larger markers first, so the small ones stay on top and can be hovered
-    places.slice().sort(function (a, b) { return b.n - a.n; }).forEach(function (p) {
-      var at = project(p.lat, p.lon);
-      if (at[1] > 409) return;
-      var dot = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
-      dot.setAttribute('cx', at[0].toFixed(1));
-      dot.setAttribute('cy', at[1].toFixed(1));
-      dot.setAttribute('r', (3 + Math.min(4, Math.log(p.n + 1) / Math.LN10 * 2.4)).toFixed(1));
-      dot.style.fill = shade(p.n);
-      var where = country(p.cc);
-      if (p.city && p.city !== where) where = p.city + ', ' + where;
-      var label = where + ' · ' + p.n + (p.n > 1 ? ' visits' : ' visit');
-      dot.setAttribute('role', 'button');
-      dot.setAttribute('tabindex', '0');
-      dot.setAttribute('aria-label', label);
-      function showTip() {
-        tip.textContent = label;
-        tip.style.left = at[0] / 9 + '%';
-        tip.style.top = at[1] / 4.09 + '%';
-        tip.hidden = false;
-      }
-      dot.addEventListener('mouseenter', function () {
-        showTip();
-      });
-      dot.addEventListener('focus', showTip);
-      dot.addEventListener('click', showTip);
-      dot.addEventListener('keydown', function (event) {
-        if (event.key === 'Enter' || event.key === ' ') {
-          event.preventDefault();
-          showTip();
-        }
-      });
-      dot.addEventListener('mouseleave', function () { tip.hidden = true; });
-      dot.addEventListener('blur', function () { tip.hidden = true; });
-      svg.appendChild(dot);
-    });
-    map.setAttribute('aria-label', 'Visitor map: visits from ' + places.length + ' places');
-    map.hidden = false;
-  }
+  // The official script updates this span after the API responds. Its load
+  // event alone does not prove that a count was received.
+  var timeout = setTimeout(unavailable, 15000);
+  var observer = new MutationObserver(function () {
+    var value = count.textContent.trim();
+    if (!/^\d+$/.test(value)) return;
+    var total = Number(value);
+    if (!Number.isSafeInteger(total) || total < 1) return;
+    observer.disconnect();
+    clearTimeout(timeout);
+    count.textContent = total.toLocaleString('en-US');
+    views.setAttribute('aria-busy', 'false');
+  });
+  observer.observe(count, { childList: true, subtree: true, characterData: true });
+
+  var script = document.createElement('script');
+  script.src = 'https://busuanzi.9420.ltd/js';
+  script.async = true;
+  script.referrerPolicy = 'strict-origin-when-cross-origin';
+  script.onerror = function () {
+    clearTimeout(timeout);
+    observer.disconnect();
+    unavailable();
+  };
+  document.head.appendChild(script);
 })();
 
 /* Reveal on scroll: blocks that start below the fold fade up as they come into
