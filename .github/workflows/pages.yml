@@ -4,8 +4,18 @@ on:
   push:
     branches: [main]
   schedule:
-    - cron: '23 * * * *'
+    # Daily at 10:23 Beijing time. 51.LA's free API has a monthly quota.
+    - cron: '23 2 * * *'
   workflow_dispatch:
+    inputs:
+      refresh_analytics:
+        description: Refresh saved visitor locations from 51.LA
+        type: boolean
+        default: true
+      include_today:
+        description: Include today's provisional visits in a manual refresh
+        type: boolean
+        default: true
 
 permissions:
   contents: read
@@ -19,7 +29,7 @@ concurrency:
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
@@ -28,15 +38,106 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '24'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
       - name: Verify snapshot handling
-        run: node --test scripts/test/visitor-snapshot.test.mjs visitor-map.test.cjs
-      - name: Refresh public city aggregates
-        run: node scripts/update-visitor-snapshot.mjs
+        run: |
+          node --test scripts/test/visitor-snapshot.test.mjs visitor-map.test.cjs main-analytics.test.cjs
+          python -m unittest discover -s scripts/test -p 'test_*.py' -v
+      # This cache contains only validated public city/day aggregates and the
+      # request-count ledger. It never contains API responses, IPs, keys or MMDB.
+      - name: Restore aggregate ledger from prior runs
+        uses: actions/cache/restore@v4
+        id: ledger-cache
+        with:
+          path: .visitor-analytics-cache/visitor-51la-state.json
+          key: visitor-aggregates-v1-${{ github.repository_id }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            visitor-aggregates-v1-${{ github.repository_id }}-
+      - name: Restore the last published map and conservative request ledger
+        id: restore
+        shell: bash
+        run: |
+          set +e
+          python scripts/update-51la-snapshot.py \
+            --restore-only \
+            --state visitor-51la-state.json \
+            --output visitor-locations.json \
+            --cache-state .visitor-analytics-cache/visitor-51la-state.json \
+            --state-url https://dianqiao-lei.github.io/visitor-51la-state.json
+          result=$?
+          set -e
+          if [ "$result" -eq 0 ]; then
+            echo 'can_sync=true' >> "$GITHUB_OUTPUT"
+          elif [ "$result" -eq 2 ]; then
+            echo 'can_sync=false' >> "$GITHUB_OUTPUT"
+            echo '::warning::Published analytics state is unavailable; retaining saved points without using API quota.'
+          else
+            exit "$result"
+          fi
+      - name: Install the offline geolocation reader
+        id: geo-reader
+        if: steps.restore.outputs.can_sync == 'true' && (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.refresh_analytics))
+        continue-on-error: true
+        run: python -m pip install --disable-pip-version-check maxminddb==3.2.0
+      - name: Fetch and validate the monthly offline city database
+        id: geo-database
+        if: steps.geo-reader.outcome == 'success'
+        continue-on-error: true
+        run: python scripts/fetch-geo-database.py --output "$RUNNER_TEMP/dbip-city-lite.mmdb"
+      - name: Refresh city aggregates within the free API allowance
+        id: refresh
+        if: steps.geo-database.outcome == 'success'
+        env:
+          LA_ACCESS_KEY: ${{ secrets.LA_ACCESS_KEY }}
+          LA_SECRET_KEY: ${{ secrets.LA_SECRET_KEY }}
+          INCLUDE_TODAY: ${{ github.event_name == 'workflow_dispatch' && inputs.include_today }}
+        shell: bash
+        run: |
+          args=(--state visitor-51la-state.json --output visitor-locations.json)
+          args+=(--mmdb "$RUNNER_TEMP/dbip-city-lite.mmdb" --monthly-limit 90 --max-requests-per-run 3)
+          if [ "$INCLUDE_TODAY" = 'true' ]; then args+=(--include-today); fi
+          set +e
+          python scripts/update-51la-snapshot.py "${args[@]}"
+          result=$?
+          set -e
+          if [ "$result" -eq 2 ]; then
+            echo '::warning::Analytics refresh was incomplete; valid saved points and the request ledger will be retained.'
+          elif [ "$result" -ne 0 ]; then
+            exit "$result"
+          fi
+      # Persist attempted-request counts even when an API query or deployment
+      # fails. A force-killed runner may still lose its last few reservations;
+      # the 90-call local ceiling leaves headroom below the provider's free 100.
+      - name: Validate and save public aggregate state for recovery
+        id: prepare-ledger
+        if: always() && steps.restore.outcome == 'success'
+        shell: bash
+        run: |
+          python - <<'PY'
+          import importlib.util
+          from datetime import datetime, timezone
+          from pathlib import Path
+          spec = importlib.util.spec_from_file_location('visitor_sync', 'scripts/update-51la-snapshot.py')
+          module = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(module)
+          state = module.validate_state(module.load_json(Path('visitor-51la-state.json')),
+                                        datetime.now(timezone.utc), '3RWElwTgQjmTbrIQ')
+          module.atomic_json(Path('.visitor-analytics-cache/visitor-51la-state.json'), state)
+          PY
+      - name: Cache aggregate request ledger before deployment
+        if: always() && steps.prepare-ledger.outcome == 'success'
+        uses: actions/cache/save@v4
+        continue-on-error: true
+        with:
+          path: .visitor-analytics-cache/visitor-51la-state.json
+          key: ${{ steps.ledger-cache.outputs.cache-primary-key }}
       - uses: actions/configure-pages@v5
       - name: Prepare public files
         run: |
           mkdir _site
-          cp index.html main.js styles.css visitor-map.js robots.txt visitor-locations.json _site/
+          cp index.html main.js styles.css visitor-map.js robots.txt visitor-locations.json visitor-51la-state.json _site/
           cp -R images _site/
           touch _site/.nojekyll
       - uses: actions/upload-pages-artifact@v3
