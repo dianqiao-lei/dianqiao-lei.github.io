@@ -20,6 +20,14 @@ The page is plain static HTML/CSS/JS. Its public address is [dianqiao-lei.github
 2. Enable **Settings → Pages → Deploy from a branch** for the `main` branch and `/ (root)`.
 3. Leave **Custom domain** empty to use the default GitHub Pages address. The `.nojekyll` file enables plain static-file publishing.
 
+## Search visibility
+
+The homepage intentionally opts out of search results with a static `robots` meta tag in the HTML head: `noindex, nofollow, noimageindex, nosnippet`. This covers the homepage and its section anchors, including name-based searches, while keeping direct links usable. Keep this tag when editing the page, and add it to any future HTML pages.
+
+`robots.txt` blocks crawling of `/images/` but deliberately leaves the HTML accessible: search engines must fetch the page to see `noindex`. Do not add a site-wide `Disallow: /`, which would prevent them from seeing the exclusion. No sitemap is submitted.
+
+This is an indexing preference, not access control. Existing search listings may remain until the engine recrawls the page. Other sites, the public GitHub repository, and crawlers that ignore the rules are outside this page's control. For urgent removal of an existing Google result, use the verified site's Search Console Removals tool alongside the persistent `noindex` rule. See [Google's noindex guidance](https://developers.google.com/search/docs/crawling-indexing/block-indexing) and [image removal guidance](https://developers.google.com/search/docs/crawling-indexing/prevent-images-on-your-page).
+
 ## Source of truth
 
 Text is synchronized from the latest files in `../CV`; the portrait, publication teasers, Tsinghua mark, Oxford and Stanford seals, favicon, and dotted world map are under `images/`. The reference repository is public at `https://github.com/ChenAnno/ChenAnno.github.io`.

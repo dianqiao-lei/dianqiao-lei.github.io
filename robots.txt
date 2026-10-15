@@ -1,0 +1,4 @@
+# Keep HTML crawlable so search engines can read its noindex meta tag.
+# Images should not be crawled or included in image search.
+User-agent: *
+Disallow: /images/
