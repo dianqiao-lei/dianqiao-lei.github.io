@@ -1,7 +1,7 @@
 # 51.LA daily city snapshot
 
-`update-51la-snapshot.py` queries the official read-only historical session API,
-looks up each session's IP in a local DB-IP City Lite MMDB, and publishes only
+`update-51la-snapshot.py` queries the official read-only historical page-view API,
+looks up each page view's IP in a local DB-IP City Lite MMDB, and publishes only
 city aggregates. It does not send an IP to another geolocation provider. API
 responses, IP addresses, UUIDs, referrers, and visited URLs are never saved or
 printed. The 51.LA collection service itself still receives those fields; this
@@ -9,10 +9,11 @@ export is not a claim that 51.LA collects only anonymous city counts.
 
 ## Verified API contract
 
-Sources: [historical session API](https://v6.51.la/doc/index.html#/访问明细/1),
-[signing rules](https://v6.51.la/doc/index.html#/调用说明/README).
+Sources: [historical page-view API](https://v6.51.la/doc/index.html#/访问明细/2),
+[signing rules](https://v6.51.la/doc/index.html#/调用说明/README),
+and [official free-plan limits](https://v6.51.la/).
 
-- Read-only query: `POST https://v6-open.51.la/open/visitor/detail/list`.
+- Read-only query: `POST https://v6-open.51.la/open/visitor/detail/page/list`.
 - Body: `maskId`, `day` (`YYYY-MM-dd`), `page`, `size=100`, `accessKey`,
   four-character `nonce`, millisecond `timestamp`, and `sign`.
 - Signature: uppercase SHA256 hex of the UTF-8 text
@@ -20,14 +21,18 @@ Sources: [historical session API](https://v6.51.la/doc/index.html#/访问明细/
 - Keep the account's default **medium security** setting. Low-security mode
   signs differently; high-security mode encrypts the response and is not
   implemented by this exporter.
-- Each row is a session, not one page view. `pv` is its number of page views.
-  City `n` and `mappedPageviews` sum `pv`. A zero-PV row adds no map point.
+- Each returned row counts as **one page view**, regardless of its `pv` field.
+  City `n` counts these records, rather than summing a session's `pv`. If a
+  visitor changes IP within one session, each page view is located using its
+  own IP instead of assigning the entire session to one location.
+- A UUID is not a required event ID. Repeated IPs, UUIDs, timestamps, or even
+  identical rows are not deduplicated: they can represent genuine repeat views.
 - `dateTime` is interpreted in the account's China time zone
   (`Asia/Shanghai`). Confirm this on the initial real response if the provider
   changes its time-zone behavior. No client locale is used.
-- All reported pages must be present, with stable total/page counts and no
-  duplicate session identities. A changing current-day list may fail this
-  consistency check and is retried as a closed day later.
+- All reported pages must be present, with the requested page number/size,
+  stable total/page counts, and exactly the expected number of rows. A changing
+  current-day list may fail this consistency check and is retried later.
 
 ## Files and dependencies
 
@@ -43,6 +48,12 @@ It is safe to publish with the site: it contains no per-visitor identifiers.
 `visitor-locations.json` contains the existing map schema plus `coverage`.
 The state file is necessary to avoid both double counting and resetting the
 monthly request budget. Do not replace it with a fresh state on each deployment.
+
+State version 2 records each day's `method` (`pageview-ip`, or retained legacy
+`session-ip`) and `recordCount`. Reading a version-1 state preserves its existing
+city counts, the genuine **13-view baseline**, and request ledger while marking
+its daily data as legacy. Each legacy day is corrected only after a successful
+full per-PV fetch; migration itself invents no visits and resets no allowance.
 
 Run tests without any external requests:
 
@@ -70,10 +81,10 @@ made during account setup. Initialization refuses an existing state. The
 cutover date is derived from the timestamp in `Asia/Shanghai`; it is not a
 second independently configured date.
 
-Session rows with timestamps before the boundary are excluded. This is a clean
-cutover when the SDK first starts after that boundary. The API cannot split a
-session that was already active across a later cutover: do not use this filter
-to claim an exact split of previously active dual collection.
+Page-view timestamps are checked against this boundary, so a session spanning
+it does not force all of that session's views into one side. The API's example
+timestamps have only second precision; the collection boundary and provider
+timestamp precision still limit claims about an exact subsecond cutover.
 
 ## Restore and daily synchronization
 
@@ -114,18 +125,24 @@ python3 scripts/update-51la-snapshot.py \
   --monthly-limit 90 --max-requests-per-run 3
 ```
 
-Default behavior settles yesterday, then recovers missing/provisional days
-within the latest 15 calendar dates. A previously settled yesterday is not
-queried again on another run the same day. `--include-today` optionally queries
-today after closed days; today's summary remains explicitly provisional.
-The provider's public help describes a 15-day detail window, so older missing
-days remain identified as missing instead of being fabricated or repeatedly
-queried. `--lookback-days` can reduce the window but cannot exceed 14 days before
-today.
+The workflow runs daily at **00:00 Beijing time** (16:00 UTC; GitHub may delay
+the run). It queries yesterday first, then rechecks the day before yesterday
+for late-arriving records, then repairs older missing/provisional or legacy
+days within the latest 15 calendar dates. A day already exported on or after
+its second following day does not need another routine late-arrival recheck.
+`--include-today` optionally queries today after closed days; today's summary
+remains explicitly provisional. The provider's free plan retains detail logs
+for 15 days, so older missing days remain identified as gaps instead of being
+fabricated or repeatedly queried. `--lookback-days` can reduce the window but
+cannot exceed 14 days before today.
 
-Daily summaries are committed only after every page succeeds. If the source
-returns fewer sessions/pageviews than a previously verified daily summary,
-that day is retained for review. Country-only or unresolvable IP locations
+Daily summaries are committed only after every page succeeds. A corrected
+export replaces its day's previous distribution even when the total is
+unchanged: equal totals do not imply equal locations. Legacy session aggregates
+are replaced by the verified per-PV result, not added to it. If a fetched result
+has a lower combined mapped/unmapped total than the saved day, its previous
+summary is retained for review, including during legacy migration; history is
+not silently reduced. Country-only or unresolvable IP locations
 increase `unmappedPageviews`; they are never plotted at guessed city centers.
 
 The provider's free allowance is 100 API requests/month. The default local
@@ -138,6 +155,13 @@ and the request charge remains. A day requiring more than three pages cannot
 complete under the default run cap; a manual run may explicitly increase
 `--max-requests-per-run` within the remaining monthly allowance. No paid quota
 is purchased automatically.
+
+With at most 100 page views per day, fetching yesterday plus the late-arrival
+recheck usually needs about **60–62 requests per month**, before manual
+refreshes, repairs, and retries on later runs. Every additional 100-row page
+uses another request. Higher traffic can exhaust the free budget; this is not
+an unlimited export service. Gaps must be repaired before the provider's
+15-day retention expires if the original records are to remain recoverable.
 
 Run workflows serially and save the state cache even after an API failure,
 before attempting deployment. A cache is not an atomic, external transaction:
@@ -162,7 +186,10 @@ provider allowance and must be included in this operational budget.
 timestamp). A failed attempt does not make old data appear fresh.
 `coverage.completeThrough` describes contiguous fully synchronized dates from
 cutover, `missingDays` records gaps, and `provisionalDays` identifies incomplete
-calendar days. `lastAttemptAt` is separate from data freshness. A snapshot makes
+calendar days. A fully fetched closed day can still receive its later recheck.
+`lastAttemptAt` is separate from data freshness. A snapshot makes
 known points load from the same origin as the homepage; it cannot reconstruct
-visits that never reached 51.LA, guarantee city-level IP accuracy, or identify
-a visitor's physical location when they use a VPN/proxy.
+visits that never reached 51.LA (for example, blocked scripts or network
+requests), guarantee city-level IP accuracy, or identify a visitor's physical
+location when they use a VPN/proxy. Unlocatable records remain counted as
+unmapped; no claim is made that every real visit can be plotted.
