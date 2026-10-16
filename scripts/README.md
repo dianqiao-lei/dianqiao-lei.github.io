@@ -8,7 +8,7 @@ documented in detail in [`51la-README.md`](51la-README.md).
 ## Daily workflow
 
 `.github/workflows/pages.yml` deploys the static site on pushes, manual runs and
-every day at **10:23 Beijing time**. Pushes restore and deploy the last valid map
+every day at **00:00 Beijing time** (16:00 UTC; scheduled runs may be delayed). Pushes restore and deploy the last valid map
 without querying 51.LA. Scheduled runs synchronize closed days; manual runs can
 also include today's provisional visits.
 
