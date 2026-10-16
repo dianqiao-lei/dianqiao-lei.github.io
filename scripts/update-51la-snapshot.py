@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Export 51.LA session pageviews as public city aggregates, never raw visits.
+"""Export individual 51.LA pageviews as public city aggregates, never raw visits.
 
-Official contract: https://v6.51.la/doc/index.html#/访问明细/1
+Official contract: https://v6.51.la/doc/index.html#/访问明细/2
 The documented POST is a read-only query, not a collection request. IP addresses
 exist only in memory while looking up a local MMDB; no visit response is logged
 or saved. Completed daily aggregates replace, rather than add to, prior days.
@@ -26,7 +26,7 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-API_URL = "https://v6-open.51.la/open/visitor/detail/list"
+API_URL = "https://v6-open.51.la/open/visitor/detail/page/list"
 PAGE_SIZE = 100
 MAX_BYTES = 2 * 1024 * 1024
 MAX_STATE_BYTES = 32 * 1024 * 1024
@@ -34,7 +34,8 @@ MAX_COUNT = 9_007_199_254_740_991
 SHANGHAI = ZoneInfo("Asia/Shanghai")
 UTC = timezone.utc
 STAT_KEYS = {"places", "mappedPageviews", "unmappedPageviews", "startedAt", "updatedAt"}
-DAY_KEYS = STAT_KEYS | {"sessionCount", "complete"}
+LEGACY_DAY_KEYS = STAT_KEYS | {"sessionCount", "complete"}
+DAY_KEYS = STAT_KEYS | {"method", "recordCount", "complete"}
 STATE_KEYS = {"version", "source", "maskId", "cutoverAt", "startDate", "baseline",
               "days", "requests", "lastAttemptAt", "lastOutcome"}
 OUTCOMES = {"initialized", "ok", "quota_exhausted", "run_limit", "request_failed",
@@ -175,7 +176,7 @@ def validate_stats(value, now):
 
 
 def validate_state(value, now, mask_id):
-    if (not isinstance(value, dict) or set(value) != STATE_KEYS or type(value["version"]) is not int or value["version"] != 1 or
+    if (not isinstance(value, dict) or set(value) != STATE_KEYS or type(value["version"]) is not int or value["version"] not in (1, 2) or
             value["source"] != "51la" or value["maskId"] != mask_id or
             value["lastOutcome"] not in OUTCOMES):
         raise SyncError("invalid_response")
@@ -193,7 +194,8 @@ def validate_state(value, now, mask_id):
         raise SyncError("invalid_response")
     for day, daily in value["days"].items():
         day_date = parse_day(day)
-        if not start <= day_date <= today or not isinstance(daily, dict) or set(daily) != DAY_KEYS:
+        expected_keys = LEGACY_DAY_KEYS if value["version"] == 1 else DAY_KEYS
+        if not start <= day_date <= today or not isinstance(daily, dict) or set(daily) != expected_keys:
             raise SyncError("invalid_response")
         summary = validate_stats(daily, now)
         fetched = parse_stamp(summary["updatedAt"], now)
@@ -205,10 +207,13 @@ def validate_state(value, now, mask_id):
             first = parse_stamp(summary["startedAt"], now)
             if first < cutoff or first.astimezone(SHANGHAI).date() != day_date:
                 raise SyncError("invalid_response")
-        sessions = count(daily["sessionCount"])
-        if sessions == 0 and summary["mappedPageviews"] + summary["unmappedPageviews"] > 0:
+        method = "session-ip" if value["version"] == 1 else daily["method"]
+        records = count(daily["sessionCount"] if value["version"] == 1 else daily["recordCount"])
+        total = summary["mappedPageviews"] + summary["unmappedPageviews"]
+        if (method not in ("session-ip", "pageview-ip") or (records == 0 and total > 0) or
+                (method == "pageview-ip" and records != total)):
             raise SyncError("invalid_response")
-        summary.update(sessionCount=sessions, complete=daily["complete"])
+        summary.update(method=method, recordCount=records, complete=daily["complete"])
         days[day] = summary
     requests = value["requests"]
     if not isinstance(requests, dict) or len(requests) > 1200:
@@ -220,7 +225,7 @@ def validate_state(value, now, mask_id):
     if value["lastAttemptAt"] is not None:
         if parse_stamp(value["lastAttemptAt"], now) < cutoff:
             raise SyncError("invalid_response")
-    return {"version": 1, "source": "51la", "maskId": mask_id, "cutoverAt": stamp(cutoff),
+    return {"version": 2, "source": "51la", "maskId": mask_id, "cutoverAt": stamp(cutoff),
             "startDate": start.isoformat(), "baseline": baseline, "days": days,
             "requests": dict(requests), "lastAttemptAt": value["lastAttemptAt"],
             "lastOutcome": value["lastOutcome"]}
@@ -231,7 +236,7 @@ def initial_state(baseline, mask_id, cutoff, now, already_used=0):
     cutoff_date = parse_stamp(cutoff, now)
     if parse_stamp(baseline["updatedAt"], now) > cutoff_date:
         raise SyncError("invalid_response")
-    return {"version": 1, "source": "51la", "maskId": mask_id, "cutoverAt": cutoff,
+    return {"version": 2, "source": "51la", "maskId": mask_id, "cutoverAt": cutoff,
             "startDate": cutoff_date.astimezone(SHANGHAI).date().isoformat(),
             "baseline": baseline, "days": {},
             "requests": {now.astimezone(SHANGHAI).strftime("%Y-%m"): count(already_used)},
@@ -256,10 +261,20 @@ def merge_states(local, remote):
     for day, daily in remote["days"].items():
         previous = result["days"].get(day)
         if previous is not None:
+            if daily["method"] != previous["method"]:
+                # Once corrected, an old session-based export cannot move the
+                # geography back, even if an old runner gave it a later stamp.
+                corrected = daily if daily["method"] == "pageview-ip" else previous
+                legacy = previous if corrected is daily else daily
+                if (corrected["mappedPageviews"] + corrected["unmappedPageviews"] <
+                        legacy["mappedPageviews"] + legacy["unmappedPageviews"]):
+                    raise SyncError("state_unavailable")
+                result["days"][day] = copy.deepcopy(corrected)
+                continue
             if daily["updatedAt"] == previous["updatedAt"] and daily != previous:
                 raise SyncError("state_unavailable")
             newer, older = (daily, previous) if daily["updatedAt"] > previous["updatedAt"] else (previous, daily)
-            if (newer["sessionCount"] < older["sessionCount"] or
+            if (newer["recordCount"] < older["recordCount"] or
                     newer["mappedPageviews"] + newer["unmappedPageviews"] <
                     older["mappedPageviews"] + older["unmappedPageviews"]):
                 raise SyncError("state_unavailable")
@@ -400,7 +415,7 @@ def validate_page(response, requested_page, expected=None):
     return total, pages
 
 
-def session_time(record, day):
+def pageview_time(record, day):
     raw = record.get("dateTime")
     if not isinstance(raw, str) or not re.fullmatch(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}", raw):
         raise SyncError("invalid_response")
@@ -414,7 +429,7 @@ def session_time(record, day):
 
 
 def collect_day(day, client, lookup, cutoff, now, budget):
-    places, seen, unmapped, first, included_sessions = {}, set(), 0, None, 0
+    places, unmapped, first, included_records = {}, 0, None, 0
     expected, page = None, 1
     while True:
         budget.charge()
@@ -426,24 +441,17 @@ def collect_day(day, client, lookup, cutoff, now, budget):
             # finish it. The first page only informs us how many calls are needed.
             budget.require(max(0, pages - 1))
         for record in response["data"]:
-            if (not isinstance(record, dict) or not isinstance(record.get("ip"), str) or len(record["ip"]) > 64 or
-                    not isinstance(record.get("uuid"), str) or not 0 < len(record["uuid"]) <= 256):
+            if not isinstance(record, dict) or not isinstance(record.get("ip"), str) or len(record["ip"]) > 64:
                 raise SyncError("invalid_response")
-            pv = count(record.get("pv"))
-            happened = session_time(record, day)
+            happened = pageview_time(record, day)
             if happened > now.astimezone(SHANGHAI) + timedelta(minutes=5):
                 raise SyncError("invalid_response")
-            # Detect repeated/overlapping API pages. Hashes stay in memory too.
-            fingerprint = hashlib.sha256(json.dumps([record["dateTime"], record["ip"], record["uuid"]],
-                                                   ensure_ascii=True, separators=(",", ":")).encode()).digest()
-            if fingerprint in seen:
-                raise SyncError("invalid_response")
-            seen.add(fingerprint)
+            # This endpoint returns one row per pageview. Its documented `pv`
+            # may be zero and UUID is not an event identifier. Two real loads
+            # may share IP/UUID/second, so never collapse rows by those fields.
             if happened < cutoff:
                 continue
-            included_sessions += 1
-            if pv == 0:
-                continue
+            included_records += 1
             first = min(first, happened) if first else happened
             address = public_ip(record["ip"])
             try:
@@ -453,9 +461,9 @@ def collect_day(day, client, lookup, cutoff, now, budget):
             if place:
                 key = place_key(place)
                 previous = places.get(key, {}).get("n", 0)
-                places[key] = {**place, "n": count(previous + pv)}
+                places[key] = {**place, "n": count(previous + 1)}
             else:
-                unmapped = count(unmapped + pv)
+                unmapped = count(unmapped + 1)
         # Do not retain the last response (it contains IP/uuid/page/referrer data).
         del response
         if page >= pages:
@@ -464,7 +472,7 @@ def collect_day(day, client, lookup, cutoff, now, budget):
     result = {"places": sorted_places(places.values()),
               "mappedPageviews": count(sum(place["n"] for place in places.values())),
               "unmappedPageviews": unmapped, "startedAt": stamp(first) if first else None,
-              "updatedAt": stamp(now), "sessionCount": count(included_sessions),
+              "updatedAt": stamp(now), "method": "pageview-ip", "recordCount": count(included_records),
               "complete": parse_day(day) < now.astimezone(SHANGHAI).date()}
     count(result["mappedPageviews"] + unmapped)
     return result
@@ -474,19 +482,30 @@ def days_to_query(state, now, include_today, lookback_days):
     today = now.astimezone(SHANGHAI).date()
     start = max(parse_day(state["startDate"]), today - timedelta(days=lookback_days))
     yesterday = today - timedelta(days=1)
-    missing = []
+    recovery = []
     day = start
     while day < today:
         saved = state["days"].get(day.isoformat())
-        if not saved or not saved["complete"]:
-            missing.append(day.isoformat())
+        # A day gets one additional look after it has been closed for a full
+        # calendar day. This catches delayed provider ingestion without polling
+        # the whole 15-day window on every run. Legacy exports also need repair.
+        if (not saved or saved["method"] != "pageview-ip" or not saved["complete"] or
+                (day < yesterday and parse_stamp(saved["updatedAt"], now).astimezone(SHANGHAI).date() <
+                 day + timedelta(days=2))):
+            recovery.append(day.isoformat())
         day += timedelta(days=1)
-    # Settle yesterday before refreshing a moving current-day session list.
+    # New closed data first, then the delayed recheck, then older gaps/migration.
+    # At one API page per day the steady state uses about 60–62 calls/month.
     result = []
     previous = state["days"].get(yesterday.isoformat())
-    if yesterday >= start and (not previous or parse_stamp(previous["updatedAt"], now).astimezone(SHANGHAI).date() < today):
+    if yesterday >= start and (not previous or previous["method"] != "pageview-ip" or
+                               not previous["complete"] or
+                               parse_stamp(previous["updatedAt"], now).astimezone(SHANGHAI).date() < today):
         result.append(yesterday.isoformat())
-    result += [day for day in missing if day not in result]
+    delayed = (today - timedelta(days=2)).isoformat()
+    if delayed in recovery:
+        result.append(delayed)
+    result += [day for day in recovery if day not in result]
     if include_today and today >= start:
         result.append(today.isoformat())
     return result
@@ -540,8 +559,8 @@ def sync(state, client, lookup, now, persist, monthly_limit=90, run_limit=3, inc
         try:
             daily = collect_day(day, client, lookup, cutoff, now, budget)
             old = state["days"].get(day)
-            if old and (daily["sessionCount"] < old["sessionCount"] or
-                        daily["mappedPageviews"] + daily["unmappedPageviews"] < old["mappedPageviews"] + old["unmappedPageviews"]):
+            if old and (daily["mappedPageviews"] + daily["unmappedPageviews"] <
+                        old["mappedPageviews"] + old["unmappedPageviews"]):
                 raise SyncError("regression")
             state["days"][day] = daily
             state["lastOutcome"] = "ok"
@@ -644,6 +663,9 @@ def main(argv=None):
         if state is None:
             raise SyncError("state_unavailable")
         if args.restore_only:
+            # Persist deterministic v1→v2 metadata migration even when there is
+            # no cache/remote URL; retained session geography is still labelled.
+            atomic_json(args.state, state)
             atomic_json(args.output, build_snapshot(state, now, args.monthly_limit))
             print("51.LA snapshot: restored validated aggregate state; no API request made.")
             return 0

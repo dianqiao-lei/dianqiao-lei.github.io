@@ -53,31 +53,44 @@ SDK ID is separate from the administrative API secrets stored in GitHub Secrets.
 The map reads `visitor-locations.json` from the **same origin as the homepage**
 and a validated browser cache. It no longer requires visitors to reach the
 Cloudflare Worker to display saved points. Hover, click or focus a point to see
-its approximate city and page-view count. Saved points remain visible if a
-refresh fails, with their actual update timestamp; no sample locations are added.
+its approximate city and page-view count (labelled `visits`). Saved points
+remain visible if a refresh fails, and snapshot metadata retains its actual
+update timestamp; no sample locations are added.
 
-The daily Pages workflow queries 51.LA's historical sessions, resolves IPs
+The daily Pages workflow queries 51.LA's historical **individual page views**, resolves IPs
 against an offline DB-IP City Lite database, and publishes only city-level
-aggregates with coordinates rounded to one decimal place. Raw session records,
-IPs, browser identifiers, URLs and API secrets are never saved in the published
-files or workflow artifacts. The homepage includes the required DB-IP
+aggregates with coordinates rounded to one decimal place. Each record counts
+once using its own IP; session totals are not assigned wholesale to one city,
+and repeat views sharing an IP or browser identifier are not deduplicated.
+Raw records, IPs, UUIDs, URLs and API secrets are never logged, cached, or saved
+in published files or workflow artifacts. The homepage includes the required DB-IP
 attribution. A VPN may locate a visit at its exit city; unresolved locations
 remain unplotted rather than being assigned a guessed city.
 
 Migration uses a fixed real snapshot of the old Cloudflare counts and an
-explicit boundary, `2026-10-15T13:19:58.040Z`. Only eligible 51.LA sessions after
+explicit boundary, `2026-10-15T13:19:58.040Z`. Only eligible 51.LA page views after
 that boundary contribute new counts. A day's export **replaces** that day's
-previous export; it is not added twice. The old Worker's subsequently changing
+previous export, even if correcting locations leaves the same total; it is not
+added twice. The old Worker's subsequently changing
 total is never added to the new stream. `visitor-51la-state.json` preserves the
 baseline, daily city summaries and API request budget between deployments.
+Legacy session-based daily summaries migrate without resetting the genuine
+13-view baseline or request ledger, and are corrected after complete per-PV
+fetches replace them.
 
-Scheduled synchronization settles yesterday's data; a manual refresh can also
-include today's provisional visits. The workflow limits itself to 90 of the
+Synchronization runs daily at **00:00 Beijing time**, fetching yesterday and
+rechecking the day before yesterday for late-arriving records; a manual refresh
+can also include today's provisional visits. The workflow limits itself to 90 of the
 provider's 100 free API calls per month, with at most three requests per run.
+With up to 100 daily views, routine fetching and rechecking usually use about
+60–62 calls per month, before repairs and manual refreshes. The provider keeps
+visit details for 15 days; older missing records may no longer be recoverable.
 It preserves valid points on API, quota or database-download failures. GitHub
-schedules may run late, so use the displayed timestamp to judge freshness.
+schedules may run late; the snapshot's `updatedAt` records actual freshness.
 Map counts and the independent Busuanzi Total Views have different coverage and
-need not match. Missing historical visits cannot be reconstructed.
+need not match. Visits blocked before reaching 51.LA cannot be recovered, and
+unlocatable records remain in the unmapped count. The map therefore cannot
+promise a point for every real visit.
 
 See [`scripts/README.md`](scripts/README.md) for the workflow and
 [`scripts/51la-README.md`](scripts/51la-README.md) for pagination, quota, recovery
