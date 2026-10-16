@@ -24,6 +24,7 @@ a:focus{outline:none}*,*:before,*:after{-moz-box-sizing:border-box;-webkit-box-s
 .page__content .inline-logo.school-seal{width:1.3em;height:1.3em;margin-left:.22em;margin-right:.2em;vertical-align:-.28em;object-fit:contain}
 .sidebar .author__name,.page__content .pub-title,.page__content .pub-list strong,.page__content .authors strong,.page__content .authors b,.page__content .authors u{color:#000}
 .page__content .authors sup{color:var(--high);font-weight:700}
+.page__content .authors .author-team{color:#000;font-weight:400}
 .venue .venue-oral,.news-card .award{color:#d32f2f;font-weight:700}
 .sidebar .author__bio{font-family:"Songti SC","STSong","SimSun","Noto Serif SC Name","Charis SIL",Charter,"Iowan Old Style",Georgia,"PingFang SC","Hiragino Sans GB","Microsoft YaHei",serif}
 .edu-card .edu-degree,.edu-card .edu-stats strong{color:var(--fg)}
