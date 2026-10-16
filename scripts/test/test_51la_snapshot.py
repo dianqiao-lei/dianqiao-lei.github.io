@@ -72,6 +72,17 @@ class SnapshotTests(unittest.TestCase):
         writes = []
         return sync.Budget(state, NOW, monthly, run, lambda value: writes.append(copy.deepcopy(value))), writes
 
+    def legacy_state(self, used=0, day="2026-10-16", total=3, sessions=1):
+        state = self.state(used)
+        state["version"] = 1
+        state["days"][day] = {
+            "places": [{"lat": 34.1, "lon": -118.2, "cc": "US", "city": "Los Angeles", "n": total}],
+            "mappedPageviews": total, "unmappedPageviews": 0,
+            "startedAt": f"{day}T14:00:00.000Z", "updatedAt": f"{day}T15:00:00.000Z",
+            "sessionCount": sessions, "complete": False,
+        }
+        return state
+
     def collect(self, responses, state=None, day="2026-10-16", **budget_options):
         state = state or self.state()
         budget, writes = self.budget(state, **budget_options)
@@ -86,15 +97,19 @@ class SnapshotTests(unittest.TestCase):
         self.assertEqual(payload["timestamp"], "1624939232345")
         self.assertEqual(payload["size"], 100)
         self.assertNotIn("secret", json.dumps(payload))
+        with patch.object(sync, "read_response", return_value=page([])) as request:
+            sync.APIClient("fixture-access", "fixture-secret", MASK).query("2026-10-16", 1)
+        self.assertEqual(request.call_args.args[0].full_url,
+                         "https://v6-open.51.la/open/visitor/detail/page/list")
 
-    def test_chinese_city_pv_weighting_unknowns_and_no_raw_fields(self):
+    def test_each_row_counts_once_with_unknowns_and_no_raw_fields(self):
         records = [visit(1, 3), visit(2, 2, ip="8.8.8.8"), visit(3, 4, ip="10.0.0.1"), visit(4, 0)]
         daily, state, _, writes = self.collect({("2026-10-16", 1): page(records)})
-        self.assertEqual(daily["mappedPageviews"], 5)
-        self.assertEqual(daily["unmappedPageviews"], 4)
-        self.assertEqual(daily["sessionCount"], 4)
+        self.assertEqual(daily["mappedPageviews"], 3)
+        self.assertEqual(daily["unmappedPageviews"], 1)
+        self.assertEqual(daily["recordCount"], 4)
         self.assertTrue(daily["complete"])
-        self.assertEqual(daily["places"][0], {"lat": 39.9, "lon": 116.4, "cc": "CN", "city": "北京市", "n": 3})
+        self.assertEqual(daily["places"][0], {"lat": 39.9, "lon": 116.4, "cc": "CN", "city": "北京市", "n": 2})
         self.assertEqual(state["requests"]["2026-10"], 1)
         # The charged ledger is persisted before processing any visitor record.
         self.assertEqual(writes[0]["days"], {})
@@ -114,7 +129,7 @@ class SnapshotTests(unittest.TestCase):
         daily, _, client, _ = self.collect({("2026-10-16", 1): page(records[:100], total=101),
                                            ("2026-10-16", 2): page(records[100:], 2, 101)})
         self.assertEqual(daily["mappedPageviews"], 101)
-        self.assertEqual(daily["sessionCount"], 101)
+        self.assertEqual(daily["recordCount"], 101)
         self.assertEqual(client.calls, [("2026-10-16", 1), ("2026-10-16", 2)])
 
     def test_empty_day_is_valid_without_inventing_coordinates(self):
@@ -126,9 +141,9 @@ class SnapshotTests(unittest.TestCase):
             self.assertEqual(daily["mappedPageviews"], 0)
             self.assertIsNone(daily["startedAt"])
 
-    def test_page_drift_duplicate_sessions_and_truncation_are_rejected(self):
+    def test_page_drift_and_truncation_are_rejected(self):
         first = [visit(i) for i in range(100)]
-        alternatives = [page([visit(100)], 2, 102), page([], 2, 101), page([{**first[0], "pv": 9}], 2, 101)]
+        alternatives = [page([visit(100)], 2, 102), page([], 2, 101)]
         for second in alternatives:
             with self.subTest(second=second["total"]):
                 with self.assertRaisesRegex(sync.SyncError, "invalid_response"):
@@ -136,7 +151,7 @@ class SnapshotTests(unittest.TestCase):
 
     def test_failed_second_page_keeps_entire_previous_day_and_charges_both(self):
         state = self.state()
-        original, _, _, _ = self.collect({("2026-10-16", 1): page([visit(1, 3)])})
+        original, _, _, _ = self.collect({("2026-10-16", 1): page([visit(i) for i in range(3)])})
         original["updatedAt"] = "2026-10-16T14:00:00.000Z"
         original["complete"] = False
         state["days"]["2026-10-16"] = original
@@ -174,12 +189,12 @@ class SnapshotTests(unittest.TestCase):
         state = self.state()
         first_now = datetime(2026, 10, 15, 15, 0, tzinfo=timezone.utc)
         record = {**visit(1, 2, "2026-10-15"), "dateTime": "2026-10-15 22:00:00"}
-        client = Client({("2026-10-15", 1): page([record])})
+        client = Client({("2026-10-15", 1): page([record, copy.deepcopy(record)])})
         snapshot, _, _ = sync.sync(state, client, lookup, first_now, lambda _: None, include_today=True)
         self.assertEqual(snapshot["mappedPageviews"], 15)
         self.assertFalse(state["days"]["2026-10-15"]["complete"])
         second_now = first_now + timedelta(days=1)
-        client = Client({("2026-10-15", 1): page([{**record, "pv": 4}])})
+        client = Client({("2026-10-15", 1): page([copy.deepcopy(record) for _ in range(4)])})
         snapshot, _, _ = sync.sync(state, client, lookup, second_now, lambda _: None)
         self.assertEqual(snapshot["mappedPageviews"], 17)
         self.assertTrue(state["days"]["2026-10-15"]["complete"])
@@ -193,9 +208,9 @@ class SnapshotTests(unittest.TestCase):
     def test_cutover_and_wrong_day_data_are_checked(self):
         before = {**visit(1, 9, "2026-10-15"), "dateTime": "2026-10-15 21:19:58"}
         after = {**visit(2, 3, "2026-10-15"), "dateTime": "2026-10-15 21:20:00"}
-        daily, _, _, _ = self.collect({("2026-10-15", 1): page([before, after])}, day="2026-10-15")
+        daily, _, _, _ = self.collect({("2026-10-15", 1): page([before, after, copy.deepcopy(after), copy.deepcopy(after)])}, day="2026-10-15")
         self.assertEqual(daily["mappedPageviews"], 3)
-        self.assertEqual(daily["sessionCount"], 1)
+        self.assertEqual(daily["recordCount"], 3)
         with self.assertRaisesRegex(sync.SyncError, "invalid_response"):
             self.collect({("2026-10-16", 1): page([after])})
 
@@ -209,25 +224,163 @@ class SnapshotTests(unittest.TestCase):
         self.assertEqual(state["days"], {})
         self.assertEqual(snapshot["mappedPageviews"], 13)
 
-    def test_invalid_pv_bool_negative_and_float_are_rejected(self):
-        for value in [True, -1, 1.5, "3"]:
-            with self.assertRaises(sync.SyncError):
-                self.collect({("2026-10-16", 1): page([visit(1, value)])})
+    def test_documented_pv_field_is_not_a_weight_and_uuid_is_optional(self):
+        for value in [0, 9, True, -1, 1.5, "3", None]:
+            record = visit(1, value)
+            del record["uuid"]
+            daily, _, _, _ = self.collect({("2026-10-16", 1): page([record])})
+            self.assertEqual(daily["mappedPageviews"], 1)
+            self.assertEqual(daily["recordCount"], 1)
+
+    def test_same_browser_can_have_multiple_locations_and_identical_time_loads(self):
+        same = visit(1, 0)
+        rows = [same, copy.deepcopy(same), {**same, "ip": "8.8.8.8"}]
+        daily, _, _, _ = self.collect({("2026-10-16", 1): page(rows)})
+        self.assertEqual(daily["mappedPageviews"], 3)
+        self.assertEqual([(p["cc"], p["n"]) for p in daily["places"]], [("CN", 2), ("US", 1)])
+        # Identical records across the pagination boundary can also be real.
+        daily, _, _, _ = self.collect({("2026-10-16", 1): page([same] * 100, total=101),
+                                       ("2026-10-16", 2): page([same], 2, 101)})
+        self.assertEqual(daily["mappedPageviews"], 101)
+
+    def test_v1_migration_preserves_original_aggregate_and_request_ledger(self):
+        legacy = self.legacy_state(7)
+        upgraded = sync.validate_state(legacy, NOW, MASK)
+        self.assertEqual(upgraded["version"], 2)
+        self.assertEqual(upgraded["baseline"], legacy["baseline"])
+        self.assertEqual(upgraded["requests"], {"2026-10": 7})
+        self.assertEqual(upgraded["days"]["2026-10-16"]["method"], "session-ip")
+        self.assertEqual(upgraded["days"]["2026-10-16"]["recordCount"], 1)
+        self.assertEqual(sync.build_snapshot(upgraded, NOW, 90)["mappedPageviews"], 16)
+        self.assertEqual(sync.validate_state(upgraded, NOW, MASK), upgraded)
+        self.assertEqual(legacy["version"], 1)  # The input itself was not mutated.
+
+    def test_same_total_migration_redistributes_locations_without_double_count(self):
+        state = sync.validate_state(self.legacy_state(4, sessions=8), NOW, MASK)
+        corrected = [visit(1, 0), visit(2, 0), visit(3, 0, ip="8.8.8.8")]
+        client = Client({("2026-10-16", 1): page(corrected), ("2026-10-15", 1): page([])})
+        snapshot, refreshed, issues = sync.sync(state, client, lookup, NOW, lambda _: None)
+        self.assertEqual(issues, [])
+        self.assertIn("2026-10-16", refreshed)
+        self.assertEqual(snapshot["mappedPageviews"], 16)
+        self.assertEqual([(p["cc"], p["n"]) for p in snapshot["places"]], [("US", 14), ("CN", 2)])
+        self.assertEqual(state["days"]["2026-10-16"]["method"], "pageview-ip")
+        self.assertEqual(state["requests"]["2026-10"], 6)
+        self.assertEqual(sync.sync(state, Client({}), lookup, NOW, lambda _: None)[2], [])
+        self.assertEqual(sync.build_snapshot(state, NOW, 90)["mappedPageviews"], 16)
+
+    def test_corrected_method_wins_both_merge_orders_even_if_legacy_stamp_is_later(self):
+        legacy = sync.validate_state(self.legacy_state(9, sessions=8), NOW, MASK)
+        daily, _, _, _ = self.collect({("2026-10-16", 1): page([visit(i) for i in range(3)])})
+        daily["updatedAt"], daily["complete"] = "2026-10-16T14:30:00.000Z", False
+        corrected = self.state(4)
+        corrected["days"]["2026-10-16"] = daily
+        for first, second in [(legacy, corrected), (corrected, legacy)]:
+            merged = sync.merge_states(sync.validate_state(first, NOW, MASK), sync.validate_state(second, NOW, MASK))
+            self.assertEqual(merged["days"]["2026-10-16"], daily)
+            self.assertEqual(merged["requests"]["2026-10"], 9)
+            self.assertEqual(sync.build_snapshot(merged, NOW, 90)["mappedPageviews"], 16)
+
+    def test_failed_migration_keeps_the_legacy_day_and_charged_request(self):
+        state = sync.validate_state(self.legacy_state(4), NOW, MASK)
+        old = copy.deepcopy(state["days"]["2026-10-16"])
+        client = Client({("2026-10-16", 1): page([visit(i) for i in range(100)], total=101),
+                         ("2026-10-16", 2): sync.SyncError("request_failed")})
+        _, refreshed, issues = sync.sync(state, client, lookup, NOW, lambda _: None)
+        self.assertEqual(state["days"]["2026-10-16"], old)
+        self.assertEqual(refreshed, [])
+        self.assertEqual(issues, ["request_failed"])
+        self.assertEqual(state["requests"]["2026-10"], 6)
+
+    def test_midnight_recheck_captures_late_arrivals_once_and_preserves_totals(self):
+        state = self.state()
+        midnight = datetime(2026, 10, 15, 16, 0, tzinfo=timezone.utc)  # Oct 16 in Beijing.
+        first = {**visit(1, 0, "2026-10-15"), "dateTime": "2026-10-15 23:59:59"}
+        client = Client({("2026-10-15", 1): page([first])})
+        snapshot, _, issues = sync.sync(state, client, lookup, midnight, lambda _: None)
+        self.assertEqual(issues, [])
+        self.assertEqual(snapshot["mappedPageviews"], 14)
+        self.assertEqual(sync.days_to_query(state, midnight, False, 14), [])
+        next_midnight = midnight + timedelta(days=1)
+        self.assertEqual(sync.days_to_query(state, next_midnight, False, 14), ["2026-10-16", "2026-10-15"])
+        client = Client({("2026-10-16", 1): page([]), ("2026-10-15", 1): page([first, copy.deepcopy(first)])})
+        snapshot, _, issues = sync.sync(state, client, lookup, next_midnight, lambda _: None)
+        self.assertEqual(issues, [])
+        self.assertEqual(snapshot["mappedPageviews"], 15)
+        self.assertEqual(state["requests"]["2026-10"], 3)
+        self.assertEqual(sync.days_to_query(state, next_midnight, False, 14), [])
+        self.assertNotIn("2026-10-15", sync.days_to_query(state, next_midnight + timedelta(days=1), False, 14))
+
+    def test_migration_and_delayed_rechecks_respect_quota(self):
+        state = sync.validate_state(self.legacy_state(90), NOW, MASK)
+        original = copy.deepcopy(state["days"])
+        client = Client({})
+        _, _, issues = sync.sync(state, client, lookup, NOW, lambda _: None)
+        self.assertEqual(issues, ["quota_exhausted"])
+        self.assertEqual(client.calls, [])
+        self.assertEqual(state["days"], original)
+
+    def test_v2_pageview_count_must_equal_all_rows_including_unmapped(self):
+        state = sync.validate_state(self.legacy_state(), NOW, MASK)
+        state["days"]["2026-10-16"]["method"] = "pageview-ip"
+        with self.assertRaisesRegex(sync.SyncError, "invalid_response"):
+            sync.validate_state(state, NOW, MASK)
+
+    def test_equal_total_known_unknown_reclassification_is_safe_in_both_directions(self):
+        for old_ip, new_ip in [("223.5.5.5", "10.0.0.1"), ("10.0.0.1", "223.5.5.5")]:
+            state = self.state()
+            old, _, _, _ = self.collect({("2026-10-16", 1): page([visit(i, ip=old_ip) for i in range(3)])})
+            old["updatedAt"], old["complete"] = "2026-10-16T14:00:00.000Z", False
+            state["days"]["2026-10-16"] = old
+            previous = copy.deepcopy(state)
+            client = Client({("2026-10-16", 1): page([visit(i, ip=new_ip) for i in range(3)]),
+                             ("2026-10-15", 1): page([])})
+            snapshot, _, issues = sync.sync(state, client, lookup, NOW, lambda _: None)
+            self.assertEqual(issues, [])
+            self.assertEqual(snapshot["mappedPageviews"] + snapshot["unmappedPageviews"], 16)
+            for a, b in [(state, previous), (previous, state)]:
+                merged = sync.merge_states(sync.validate_state(a, NOW, MASK), sync.validate_state(b, NOW, MASK))
+                self.assertEqual(merged["days"]["2026-10-16"], state["days"]["2026-10-16"])
+
+    def test_restore_only_migrates_v1_checkout_and_merges_corrected_cache_and_remote(self):
+        legacy = self.legacy_state(8, day="2026-10-15")
+        corrected = sync.validate_state(legacy, NOW, MASK)
+        day = corrected["days"]["2026-10-15"]
+        day.update(method="pageview-ip", recordCount=3,
+                   places=[{"lat": 39.9, "lon": 116.4, "cc": "CN", "city": "Beijing", "n": 3}])
+        corrected["requests"]["2026-10"] = 9
+        with tempfile.TemporaryDirectory() as directory:
+            state_path, cache, output = [Path(directory) / n for n in ("state.json", "cache.json", "snapshot.json")]
+            sync.atomic_json(state_path, legacy)
+            sync.atomic_json(cache, corrected)
+            with patch.dict(os.environ, {}, clear=True), patch.object(sync, "fetch_state", return_value=legacy), \
+                    patch.object(sync.APIClient, "query", side_effect=AssertionError("No API request")), redirect_stdout(io.StringIO()):
+                code = sync.main(["--restore-only", "--mask-id", MASK, "--state", str(state_path), "--output", str(output),
+                                  "--cache-state", str(cache), "--state-url", "https://fixture.invalid/state.json"])
+            self.assertEqual(code, 0)
+            saved = json.loads(state_path.read_text())
+            self.assertEqual(saved["version"], 2)
+            self.assertEqual(saved["baseline"], legacy["baseline"])
+            self.assertEqual(saved["requests"]["2026-10"], 9)
+            self.assertEqual(saved["days"]["2026-10-15"]["method"], "pageview-ip")
+            snapshot = json.loads(output.read_text())
+            self.assertEqual(snapshot["mappedPageviews"], 16)
+            self.assertEqual([(p["cc"], p["n"]) for p in snapshot["places"]], [("US", 13), ("CN", 3)])
 
     def test_regressed_daily_response_does_not_delete_real_prior_counts(self):
         state = self.state()
-        old, _, _, _ = self.collect({("2026-10-16", 1): page([visit(1, 10)])})
+        old, _, _, _ = self.collect({("2026-10-16", 1): page([visit(i) for i in range(10)])})
         old["updatedAt"] = "2026-10-16T14:00:00.000Z"
         old["complete"] = False
         state["days"]["2026-10-16"] = old
-        _, _, issues = sync.sync(state, Client({("2026-10-16", 1): page([visit(1, 2)])}), lookup, NOW, lambda _: None)
+        _, _, issues = sync.sync(state, Client({("2026-10-16", 1): page([visit(i) for i in range(2)])}), lookup, NOW, lambda _: None)
         self.assertEqual(issues, ["regression"])
         self.assertEqual(state["days"]["2026-10-16"], old)
 
     def test_restore_merge_uses_max_quota_latest_day_and_rejects_foreign_baseline(self):
         local, remote = self.state(4), self.state(2)
-        old, _, _, _ = self.collect({("2026-10-16", 1): page([visit(1, 2)])})
-        newer = {**old, "places": [{**old["places"][0], "n": 5}], "mappedPageviews": 5}
+        old, _, _, _ = self.collect({("2026-10-16", 1): page([visit(i) for i in range(2)])})
+        newer = {**old, "places": [{**old["places"][0], "n": 5}], "mappedPageviews": 5, "recordCount": 5}
         old["updatedAt"] = "2026-10-16T14:00:00.000Z"
         old["complete"] = False
         local["days"]["2026-10-16"], remote["days"]["2026-10-16"] = old, newer
@@ -252,11 +405,11 @@ class SnapshotTests(unittest.TestCase):
 
     def test_merge_rejects_regression_in_either_source_and_timestamp_conflicts(self):
         earlier, later = self.state(), self.state()
-        daily, _, _, _ = self.collect({("2026-10-16", 1): page([visit(1, 5)])})
+        daily, _, _, _ = self.collect({("2026-10-16", 1): page([visit(i) for i in range(5)])})
         daily["updatedAt"] = "2026-10-16T14:00:00.000Z"
         daily["complete"] = False
         earlier["days"]["2026-10-16"] = copy.deepcopy(daily)
-        daily.update(places=[{**daily["places"][0], "n": 2}], mappedPageviews=2,
+        daily.update(places=[{**daily["places"][0], "n": 2}], mappedPageviews=2, recordCount=2,
                      updatedAt="2026-10-16T15:00:00.000Z")
         later["days"]["2026-10-16"] = daily
         for local, remote in [(earlier, later), (later, earlier)]:
