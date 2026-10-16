@@ -5,7 +5,8 @@ const fs = require('node:fs');
 const source = fs.readFileSync(require('node:path').join(__dirname, 'visitor-map.js'), 'utf8');
 const NOW = '2026-10-15T12:00:00.000Z';
 const CACHE = 'visitor-map-public-v1';
-const DAILY_CACHE = 'visitor-map-daily-v1';
+const DAILY_CACHE = 'visitor-map-daily-v2';
+const LEGACY_DAILY_CACHE = 'visitor-map-daily-v1';
 const ENDPOINT = 'https://collector.example.invalid';
 const live = (n = 3) => ({
   places: [{ city: 'Beijing', cc: 'CN', lat: 39.9, lon: 116.4, n }],
@@ -14,7 +15,7 @@ const live = (n = 3) => ({
 const saved = (n = 3, updatedAt = '2026-10-15T10:00:00.000Z') => ({ ...live(n), updatedAt });
 const flush = async () => { await new Promise(setImmediate); await new Promise(setImmediate); };
 
-function harness({ cache, dailyCache, daily = false, endpoint = ENDPOINT, production = true, fetchAvailable = true, snapshot = 'visitor-locations.json', storageDenied = false, abortAvailable = true } = {}) {
+function harness({ cache, dailyCache, legacyDailyCache, daily = false, endpoint = ENDPOINT, production = true, fetchAvailable = true, snapshot = 'visitor-locations.json', storageDenied = false, abortAvailable = true } = {}) {
   const nodes = [];
   function node() {
     return { attrs: {}, style: {}, events: {}, hidden: false, textContent: '',
@@ -36,6 +37,7 @@ function harness({ cache, dailyCache, daily = false, endpoint = ENDPOINT, produc
   const location = new URL(production ? 'https://dianqiao-lei.github.io/#service' : 'http://127.0.0.1:8000/#service');
   const storage = new Map(cache ? [[CACHE, typeof cache === 'string' ? cache : JSON.stringify(cache)]] : []);
   if (dailyCache) storage.set(DAILY_CACHE, typeof dailyCache === 'string' ? dailyCache : JSON.stringify(dailyCache));
+  if (legacyDailyCache) storage.set(LEGACY_DAILY_CACHE, JSON.stringify(legacyDailyCache));
   const localStorage = {
     getItem(key) { if (storageDenied) throw new Error('Storage denied'); return storage.get(key) || null; },
     setItem(key, value) { if (storageDenied) throw new Error('Storage denied'); storage.set(key, value); }
@@ -118,6 +120,36 @@ test('new snapshot upgrades cached cities, while an older snapshot never rolls c
     await flush();
     markerCount(h, expected);
     assert.equal(JSON.parse(h.storage.get(CACHE)).mappedPageviews, expected);
+  }
+});
+
+test('newer daily corrections can redistribute equal totals between cities and unknown locations', async () => {
+  for (const [beforeMapped, afterMapped] of [[5, 3], [3, 5]]) {
+    const initial = { ...saved(beforeMapped), unmappedPageviews: 6 - beforeMapped };
+    const corrected = { ...saved(afterMapped, '2026-10-15T11:00:00.000Z'),
+      unmappedPageviews: 6 - afterMapped,
+      places: [{ city: 'Tokyo', cc: 'JP', lat: 35.7, lon: 139.7, n: afterMapped }] };
+    const h = harness({ daily: true, dailyCache: initial });
+    await flush();
+    h.calls[0].resolve(corrected);
+    await flush();
+    assert.match(h.svg.children[0].attrs['aria-label'], /^Tokyo, Japan/);
+    assert.deepEqual(JSON.parse(h.storage.get(DAILY_CACHE)), corrected);
+  }
+});
+
+test('daily corrections cannot replace newer cached data or reduce the combined total', async () => {
+  const initial = { ...saved(3, '2026-10-15T11:00:00.000Z'), unmappedPageviews: 3 };
+  for (const incoming of [
+    { ...saved(5), unmappedPageviews: 1 },
+    { ...saved(4, NOW), unmappedPageviews: 1 }
+  ]) {
+    const h = harness({ daily: true, dailyCache: initial });
+    await flush();
+    h.calls[0].resolve(incoming);
+    await flush();
+    markerCount(h, 3);
+    assert.deepEqual(JSON.parse(h.storage.get(DAILY_CACHE)), initial);
   }
 });
 
@@ -273,9 +305,9 @@ test('an empty genuine database shows an empty state without inventing a point o
 });
 
 
-test('production daily mode reads only the homepage snapshot and ignores legacy collector cache', async () => {
+test('production daily mode reads only the homepage snapshot and ignores legacy collector and session-IP caches', async () => {
   // Even a leftover endpoint attribute must not revive Cloudflare requests.
-  const h = harness({ daily: true, cache: saved(99) });
+  const h = harness({ daily: true, cache: saved(99), legacyDailyCache: saved(88) });
   assert.equal(h.svg.children.length, 0, 'legacy source cache is isolated');
   await flush();
   assert.equal(h.calls.length, 1);
@@ -288,6 +320,7 @@ test('production daily mode reads only the homepage snapshot and ignores legacy 
   assert.match(h.status.textContent, /updated daily · saved Oct 15, 2026, 10:00 UTC/);
   assert.equal(JSON.parse(h.storage.get(DAILY_CACHE)).mappedPageviews, 13);
   assert.equal(JSON.parse(h.storage.get(CACHE)).mappedPageviews, 99, 'legacy cache remains untouched');
+  assert.equal(JSON.parse(h.storage.get(LEGACY_DAILY_CACHE)).mappedPageviews, 88, 'old daily cache remains untouched');
   assert.equal(h.calls.length, 1, 'no POST or collector read is attempted');
 });
 

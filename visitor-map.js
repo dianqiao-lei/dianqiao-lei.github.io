@@ -10,8 +10,8 @@
   var endpoint = map.getAttribute('data-endpoint');
   var production = location.hostname === 'dianqiao-lei.github.io';
   var daily = map.getAttribute('data-refresh') === 'daily';
-  // Keep the new daily source separate from cached legacy collector totals.
-  var cacheKey = daily ? 'visitor-map-daily-v1' : 'visitor-map-public-v1';
+  // Per-pageview locations must not inherit the former session-IP map cache.
+  var cacheKey = daily ? 'visitor-map-daily-v2' : 'visitor-map-public-v1';
   var current = null;
   var pending = 0;
 
@@ -140,10 +140,11 @@
   function accept(input, saved) {
     var data = validate(input, saved);
     if (current) {
-      // The collector may finish before a slow snapshot fetch. Once live data is
-      // displayed, never replace it with a saved copy; never roll counters back.
-      if ((!current.saved && saved) || data.mappedPageviews < current.data.mappedPageviews ||
-          data.unmappedPageviews < current.data.unmappedPageviews ||
+      // Preserve live authority and total visits, but allow a newer geographic
+      // correction to redistribute visits between mapped and unknown locations.
+      if ((!current.saved && saved) ||
+          data.mappedPageviews + data.unmappedPageviews <
+            current.data.mappedPageviews + current.data.unmappedPageviews ||
           (saved && data.updatedAt < current.data.updatedAt)) return;
     }
     draw(data, saved);
