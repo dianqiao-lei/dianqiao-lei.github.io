@@ -17,7 +17,7 @@ The page is plain static HTML/CSS/JS. Its public address is [dianqiao-lei.github
 ## GitHub Pages deployment
 
 1. Upload the contents of this folder to [dianqiao-lei/dianqiao-lei.github.io](https://github.com/dianqiao-lei/dianqiao-lei.github.io).
-2. Set **Settings → Pages → Source → GitHub Actions**. `.github/workflows/pages.yml` tests and publishes the static site on main-branch updates, manual runs, and a daily schedule at 10:23 Beijing time. Ordinary source updates preserve the saved map without querying the analytics API.
+2. Set **Settings → Pages → Source → GitHub Actions**. `.github/workflows/pages.yml` tests and publishes the static site on main-branch updates, manual runs, and a daily schedule at 00:00 Beijing time (16:00 UTC; GitHub may delay scheduled runs). Ordinary source updates preserve the saved map without querying the analytics API.
 3. Leave **Custom domain** empty to use the default GitHub Pages address. The workflow copies only public homepage assets into the deployment artifact.
 
 ## Search visibility
