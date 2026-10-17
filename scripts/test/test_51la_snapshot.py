@@ -517,6 +517,76 @@ class SnapshotTests(unittest.TestCase):
             with self.assertRaisesRegex(sync.SyncError, "invalid_response"):
                 sync.read_response(sync.urllib.request.Request("https://fixture.invalid/state.json"), state_request=True)
 
+    def test_transport_diagnostics_classify_failures_without_private_text(self):
+        private = "private-fixture-access secret-token 223.5.5.5 https://fixture.invalid/private-path"
+        failures = [
+            (sync.socket.gaierror(-2, private), "dns_error"),
+            (sync.ssl.SSLCertVerificationError(1, private), "tls_certificate_error"),
+            (TimeoutError(private), "timeout"),
+            (ConnectionResetError(private), "transport_error"),
+        ]
+        for error, category in failures:
+            for wrapped in (False, True):
+                with self.subTest(category=category, wrapped=wrapped):
+                    failure = sync.urllib.error.URLError(error) if wrapped else error
+                    stderr = io.StringIO()
+                    with patch.object(sync.urllib.request, "build_opener") as build, redirect_stderr(stderr):
+                        build.return_value.open.side_effect = failure
+                        with self.assertRaisesRegex(sync.SyncError, "^request_failed$"):
+                            sync.read_response(sync.urllib.request.Request("https://fixture.invalid/private-path"))
+                    self.assertEqual(stderr.getvalue(), f"51.LA snapshot transport failure: {category}\n")
+                    self.assertNotIn(private, stderr.getvalue())
+        # Some URLError reasons are strings rather than typed exceptions.
+        stderr = io.StringIO()
+        with patch.object(sync.urllib.request, "build_opener") as build, redirect_stderr(stderr):
+            build.return_value.open.side_effect = sync.urllib.error.URLError(private)
+            with self.assertRaisesRegex(sync.SyncError, "^request_failed$"):
+                sync.read_response(sync.urllib.request.Request("https://fixture.invalid/private-path"))
+        self.assertEqual(stderr.getvalue(), "51.LA snapshot transport failure: transport_error\n")
+
+    def test_http_diagnostics_only_print_validated_numeric_status(self):
+        private = "private-fixture-secret 223.5.5.5"
+        for status in (401, 403, 429, 503, private, True, 999):
+            with self.subTest(status=status):
+                stderr, body = io.StringIO(), io.BytesIO(private.encode())
+                error = sync.urllib.error.HTTPError("https://fixture.invalid/private-path", status,
+                                                   private, {"Location": private}, body)
+                with patch.object(sync.urllib.request, "build_opener") as build, redirect_stderr(stderr):
+                    build.return_value.open.side_effect = error
+                    with self.assertRaisesRegex(sync.SyncError, "^request_failed$"):
+                        sync.read_response(sync.urllib.request.Request("https://fixture.invalid/private-path"))
+                suffix = f" status={status}" if type(status) is int and 100 <= status <= 599 else ""
+                self.assertEqual(stderr.getvalue(), f"51.LA snapshot transport failure: http_status{suffix}\n")
+                self.assertEqual(body.tell(), 0)  # No error-body inspection or logging.
+
+    def test_redirect_is_refused_and_target_or_credentials_are_not_logged(self):
+        request = sync.urllib.request.Request("https://fixture.invalid/api", data=b"private-fixture-secret")
+        stderr = io.StringIO()
+        with redirect_stderr(stderr), self.assertRaisesRegex(sync.SyncError, "^request_failed$"):
+            sync.NoRedirect().redirect_request(request, None, 302, "private-fixture-secret", {},
+                                               "https://private-target.invalid/223.5.5.5")
+        self.assertEqual(stderr.getvalue(), "51.LA snapshot transport failure: redirect_refused status=302\n")
+
+    def test_non_200_response_has_safe_diagnostic_and_does_not_read_body(self):
+        stderr = io.StringIO()
+        with patch.object(sync.urllib.request, "build_opener") as build, redirect_stderr(stderr):
+            response = build.return_value.open.return_value.__enter__.return_value
+            response.status = 503
+            with self.assertRaisesRegex(sync.SyncError, "^request_failed$"):
+                sync.read_response(sync.urllib.request.Request("https://fixture.invalid/state.json"))
+            response.read.assert_not_called()
+        self.assertEqual(stderr.getvalue(), "51.LA snapshot transport failure: http_status status=503\n")
+
+    def test_state_404_keeps_missing_state_outcome_without_transport_diagnostic(self):
+        stderr = io.StringIO()
+        error = sync.urllib.error.HTTPError("https://fixture.invalid/state.json", 404,
+                                           "private-fixture-secret", {}, None)
+        with patch.object(sync.urllib.request, "build_opener") as build, redirect_stderr(stderr):
+            build.return_value.open.side_effect = error
+            with self.assertRaises(sync.StateNotFound):
+                sync.read_response(sync.urllib.request.Request("https://fixture.invalid/state.json"), state_request=True)
+        self.assertEqual(stderr.getvalue(), "")
+
     def test_invalid_cache_fails_closed_and_does_not_replace_it(self):
         with tempfile.TemporaryDirectory() as directory:
             state_path, cache, output = [Path(directory) / n for n in ("state.json", "cache.json", "snapshot.json")]
