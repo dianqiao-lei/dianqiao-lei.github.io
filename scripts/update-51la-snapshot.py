@@ -16,6 +16,8 @@ import math
 import os
 import re
 import secrets
+import socket
+import ssl
 import sys
 import tempfile
 import unicodedata
@@ -313,9 +315,19 @@ def load_json(path):
         raise SyncError("invalid_response") from None
 
 
+def report_transport_failure(category, status=None):
+    """Log only fixed categories and numeric HTTP codes, never exception text."""
+    allowed = {"http_status", "redirect_refused", "dns_error",
+               "tls_certificate_error", "timeout", "transport_error"}
+    category = category if category in allowed else "transport_error"
+    suffix = f" status={status}" if type(status) is int and 100 <= status <= 599 else ""
+    print(f"51.LA snapshot transport failure: {category}{suffix}", file=sys.stderr)
+
+
 class NoRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         # In particular, never send account credentials to a redirect target.
+        report_transport_failure("redirect_refused", code)
         raise SyncError("request_failed")
 
 
@@ -323,6 +335,7 @@ def read_response(request, limit=MAX_BYTES, state_request=False):
     try:
         with urllib.request.build_opener(NoRedirect).open(request, timeout=25) as response:
             if response.status != 200:
+                report_transport_failure("http_status", response.status)
                 raise SyncError("request_failed")
             data = response.read(limit + 1)
     except SyncError:
@@ -330,9 +343,20 @@ def read_response(request, limit=MAX_BYTES, state_request=False):
     except urllib.error.HTTPError as error:
         if state_request and error.code == 404:
             raise StateNotFound() from None
+        report_transport_failure("http_status", error.code)
         raise SyncError("request_failed") from None
-    except (OSError, urllib.error.URLError):
+    except (OSError, urllib.error.URLError) as error:
         # Exception text or response bodies could contain IPs or account values.
+        cause = error.reason if isinstance(error, urllib.error.URLError) else error
+        if isinstance(cause, socket.gaierror):
+            category = "dns_error"
+        elif isinstance(cause, ssl.SSLCertVerificationError):
+            category = "tls_certificate_error"
+        elif isinstance(cause, TimeoutError):
+            category = "timeout"
+        else:
+            category = "transport_error"
+        report_transport_failure(category)
         raise SyncError("request_failed") from None
     if len(data) > limit:
         raise SyncError("invalid_response")
